@@ -22,6 +22,8 @@
 
 ## 1. 通用原则
 
+> 跨文档契约发生冲突时，必须遵循《[一致性决策基线](一致性决策基线.md)》；该文件的已采纳决策优先于本文旧表述。
+
 ### 1.1 核心原则
 
 | 原则 | 说明 |
@@ -30,7 +32,7 @@
 | **一致性** | 同一概念在代码、数据库、API、前端中保持命名一致（如 `device_id` 在所有层统一） |
 | **最小惊讶** | 函数的名称和签名应让调用者无需查看实现就能大致猜到行为 |
 | **防御式编程** | 不信任外部输入，对所有外部输入做校验，但内部调用尽量减少冗余校验 |
-| **模块自治** | 每个模块有清晰的边界，模块间通过 API 通信，不直接访问其他模块的内部数据 |
+| **模块自治** | 每个模块有清晰的边界。模块间通过公开的 Service/领域接口通信；同一进程内不得直接访问其他模块的 Repository、ORM 模型或数据库表 |
 
 ### 1.2 命名风格对照表
 
@@ -70,9 +72,7 @@
 ```
 water-plant-control/
 ├── cmd/                        # 可执行程序入口
-│   ├── server/                 #   Web 服务端入口
-│   │   └── main.go
-│   └── collector/              #   采集引擎入口
+│   └── server/                 #   Web 服务端入口（嵌入采集引擎）
 │       └── main.go
 ├── internal/                   # 私有应用代码（不对外暴露）
 │   ├── api/                    #   HTTP handler 层
@@ -105,7 +105,7 @@ water-plant-control/
 │   │   └── writer/             #   写入引擎
 │   │       └── writer.go
 │   ├── protocol/               #   协议插件化
-│   │   ├── driver.go           #   ProtocolDriver 接口定义
+│   │   ├── driver.go           #   ProtocolDriverFactory / ProtocolConnection 接口定义
 │   │   ├── registry.go         #   注册表
 │   │   ├── s7/                 #   S7 协议实现
 │   │   └── modbus/             #   Modbus TCP 协议实现
@@ -132,6 +132,8 @@ water-plant-control/
 ├── docs/                       # 文档
 └── Makefile                    # 构建脚本
 ```
+
+运行模型采用**单进程嵌入式**：`cmd/server/main.go` 是唯一的生产可执行入口，负责初始化依赖、创建并启动采集引擎、启动 Web API，并在服务关闭时按序停止采集引擎。`internal/engine/collector` 是进程内运行时组件，不提供独立的 `cmd/collector` 进程。
 
 ### 2.2 模块目录与命名约束
 
@@ -188,7 +190,8 @@ Repository (数据访问、ORM 查询)
 func (h *DeviceHandler) Create(c *gin.Context) {
     var req CreateDeviceRequest
     if err := c.ShouldBindJSON(&req); err != nil {
-        response.BadRequest(c, "无效的请求参数", err.Error())
+        logger.Warn("请求参数绑定失败", "error", err)
+        response.BadRequest(c, "无效的请求参数", nil)
         return
     }
     device, err := h.svc.Create(c.Request.Context(), &req)
@@ -221,10 +224,20 @@ func (s *DeviceService) Create(ctx context.Context, req *CreateDeviceRequest) (*
 
 #### 3.2.3 Repository 层规范
 
-- 使用参数化查询，禁止字符串拼接 SQL
+- 所有用户值使用参数化查询，禁止拼接用户输入
 - 显式指定查询字段，禁止 `SELECT *`
-- 复杂查询使用 QueryBuilder，避免字符串拼接
+- 复杂查询使用 QueryBuilder
 - 简单 CRUD 操作统一封装 BaseRepo
+- 动态表名仅允许用于 TDengine 子表：必须由已验证 UUID 派生为 `p_<uuid32>`、通过 `^p_[0-9a-f]{32}$` 白名单并使用安全标识符引用；请求不得直接传入表名
+
+#### 3.2.4 模块间调用规范
+
+本项目采用模块化单体：模块间调用使用进程内公开的 Service/领域接口，不通过 HTTP 调用本应用自身。
+
+- 数据访问权归属数据所有模块；只有该模块的 Service 可以调用其 Repository。
+- 调用模块依赖数据所有模块公开的只读接口，不得导入、调用或复用其 Repository、ORM 模型及表名。
+- 公开接口返回稳定的领域 DTO，不暴露数据库实体；接口的实现与依赖装配由 `cmd/server/main.go` 负责。
+- 需要未来拆分为独立服务时，保持接口语义不变，再以 HTTP/gRPC 适配器替换进程内实现。
 
 ### 3.3 错误处理
 
@@ -250,7 +263,9 @@ if err != nil {
 - 采集引擎涉及设备连接池、共享内存状态，必须使用 `sync.Mutex` 或 `sync.RWMutex` 保护
 - 避免裸 `sync.Map`，优先使用 `map + sync.RWMutex`
 - 协程启动必须可控：使用 `context.Context` + `sync.WaitGroup` 管理生命周期
-- **禁止无限制启动 goroutine**，必须通过缓冲 channel 或协程池限制并发数
+- **禁止无限制启动 goroutine**，采集调度必须使用有界 worker pool；每个点位是调度任务，不默认占用一个长期 goroutine
+- 协议注册表只保存无状态工厂；每个设备持有独立连接实例
+- 同一设备连接默认串行读写，采集与人工写入通过设备级互斥或单线程命令队列协调
 
 ### 3.5 单元测试
 
@@ -359,7 +374,7 @@ export function fetchDeviceList(params: Record<string, unknown>) {
 
 ### 5.2 响应格式
 
-所有 API 响应使用统一格式：
+JSON API 使用统一格式：
 
 ```json
 {
@@ -371,9 +386,13 @@ export function fetchDeviceList(params: Record<string, unknown>) {
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
-| `code` | 是 | 0 表示成功，非 0 表示业务错误码 |
-| `message` | 是 | 人类可读的描述信息 |
+| `code` | 是 | 0 表示成功，非 0 表示模块业务错误码 |
+| `message` | 是 | 稳定、可展示的人类可读描述；不得暴露原始驱动或数据库错误 |
 | `data` | 否 | 响应数据，可为 null |
+
+**流式响应例外**：CSV/其他文件下载、SSE 和 WebSocket 成功时直接返回对应的文件或数据流，不使用 JSON 包装；发生错误时仍返回统一 JSON 错误。
+
+同步执行设备操作时，只有实际执行与回读均成功才可返回 HTTP 200 和 `code=0`。设备执行失败或超时必须返回非 2xx HTTP 状态和非零业务码；如已生成操作日志，`data` 返回 `write_log_id`。
 
 ### 5.3 分页响应格式
 
@@ -392,26 +411,34 @@ export function fetchDeviceList(params: Record<string, unknown>) {
 
 ### 5.4 错误码规范
 
-| 错误码范围 | 类别 | 说明 |
-|-----------|------|------|
-| 0 | 成功 | 请求正常处理 |
-| 400xx | 参数错误 | 请求参数校验失败 |
-| 401xx | 鉴权错误 | 未登录或 token 过期 |
-| 403xx | 权限错误 | 无操作权限 |
-| 404xx | 未找到 | 请求的资源不存在 |
-| 409xx | 冲突 | 唯一性冲突等 |
-| 500xx | 服务端错误 | 内部错误 |
+HTTP 状态码表达错误类别；响应体 `code` 表达模块内具体原因。不得根据业务码前缀推断 HTTP 状态。
 
-各模块错误码分配：
+| HTTP 状态 | 类别 | 典型场景 |
+|---|---|---|
+| 400 | 请求参数错误 | 格式、范围、必填项或时间范围不合法 |
+| 401 | 未认证 | token 缺失或失效 |
+| 403 | 无权限 | 已认证但无权执行操作 |
+| 404 | 资源不存在 | 设备、点位或历史元数据不存在 |
+| 409 | 业务冲突 | 名称冲突、不可变字段修改、状态冲突 |
+| 413 | 请求或导出结果过大 | 超出行数或文件限制 |
+| 422 | 业务校验失败 | 值类型或设备状态不满足执行条件 |
+| 502 | 下游设备/数据库执行失败 | PLC 写入失败、TDengine 查询失败 |
+| 504 | 下游超时 | PLC 或数据库超时 |
+| 500 | 未预期内部错误 | 未分类异常 |
+
+业务码按模块分配：
 
 | 模块 | 范围 |
 |------|------|
+| 通用、认证与权限 | 10001~10999 |
 | 设备管理 | 40001~40999 |
 | 采集点管理 | 41001~41999 |
 | 写入点管理 | 42001~42999 |
 | 历史数据 | 43001~43999 |
 | 采集引擎 | 50001~50999 |
 | 写入引擎 | 51001~51999 |
+
+每个模块必须维护错误码清单；同一业务原因不得复用多个错误码。
 
 ### 5.5 路径参数命名规范
 
@@ -467,14 +494,16 @@ CREATE UNIQUE INDEX idx_devices_name ON devices(name) WHERE deleted = FALSE;
 
 | 规则 | 说明 |
 |------|------|
-| 表名 | 超级表用 `snake_case`：`collection_data`, `computed_data` |
-| 子表名 | 使用采集点 ID 去连字符后的 32 位小写字符串 |
+| 超级表名 | 使用 `snake_case`：`collection_data`, `computed_data` |
+| 子表名 | 固定为 `p_<uuid32>`，必须匹配 `^p_[0-9a-f]{32}$` |
+| UUID 字段/TAG | 使用带连字符的 36 位标准 UUID |
 | 时间戳 | 统一使用 `TIMESTAMP`，精度毫秒 |
-| 质量戳 | `INT` 类型：`0=good`, `1=bad` |
-| 值 | 统一使用 `DOUBLE`，BOOL 类型存 0/1 |
-| 标签 | 元数据信息存为 TAGS，不做查询条件的有选择缓存 |
+| 质量戳 | `INT`：`0=good`, `1=bad`；`none` 不落库 |
+| 值 | 使用可空 `DOUBLE`，BOOL 存 0/1；读取失败可存 NULL |
+| 质量原因 | 可空 `VARCHAR(32)` 稳定代码，例如 `timeout`, `parse_error`, `out_of_range` |
+| 标签 | `device_name`、`data_type` 等为创建子表时的快照，不作为当前配置的权威来源 |
 
-> **质量戳转换约定**：TDengine 存储 INT 值（0=good, 1=bad），后端 API 层在返回响应时统一转换为字符串格式。前端始终处理字符串格式的质量戳。`none` 状态仅在查询无匹配记录时由 API 层返回，不会出现在 TDengine 存储中。
+> API 质量枚举统一为 `good | bad | none`。无匹配记录返回固定对象 `{value:null, quality:"none", quality_reason:null, matched_ts:null}`。
 
 ### 6.3 SQL 书写规范
 
@@ -496,24 +525,40 @@ RETURNING id;
 
 ### 6.4 数据库连接规范
 
-- 数据库连接参数通过环境变量注入，禁止硬编码在代码中
-- 连接 DSN 按 `postgres://USER:PASS@HOST:PORT/DB?sslmode=require` 格式组装
-- Go 后端使用连接池，并在应用启动时通过带超时的 `PingContext` 校验连接
-- 数据库连接配置仅由 `.env.example` 提供占位符模板，`.env` 文件必须加入 `.gitignore`
+- PostgreSQL 和 TDengine 的主机、端口、用户、密码和数据库名均通过环境变量注入，禁止硬编码
+- PostgreSQL DSN 按 `postgres://USER:PASS@HOST:PORT/DB?sslmode=require` 格式组装
+- TDengine 数据库名使用 `TDENGINE_DATABASE`，默认值可为 `aquacontrolai`
+- Go 后端使用连接池，并在应用启动时通过带超时的健康检查校验连接
+- `.env.example` 只提供占位符；`.env` 必须加入 `.gitignore`
 
 ### 6.5 CSV 导入导出格式规范
 
+CSV 分为两类：
+
+#### 6.5.1 配置型 CSV
+
+用于设备、采集点和写入点导入导出，必须可再次导入。
+
 | 规则 | 说明 |
 |------|------|
-| 编码 | 统一使用 `UTF-8 with BOM`（`charset=utf-8-sig`） |
-| 首行 | 标题行，字段名使用 `snake_case` |
-| 布尔值 | 导出为 `TRUE` / `FALSE`（大写） |
+| 编码 | `UTF-8 with BOM`（`charset=utf-8-sig`） |
+| 标题 | 固定字段，使用 `snake_case` |
+| 布尔值 | `TRUE` / `FALSE` |
 | 数字 | 整数无小数位，浮点数按实际精度输出 |
-| JSON 字段 | 导出为转义后的 JSON 字符串 |
-| 空值 | 空字段（无匹配数据）统一使用 `—`（全角破折号） |
-| 日期时间 | 格式 `YYYY-MM-DD HH:mm:ss`（24小时制） |
-| 文件扩展名 | `.csv` |
-| 导入校验 | 与对应 API 的校验规则一致，校验失败的行跳过并记录失败原因 |
+| JSON 字段 | RFC 4180 转义后的紧凑 JSON 字符串 |
+| 空值 | 空字段；导入时按字段规则解释 |
+| 日期时间 | `YYYY-MM-DD HH:mm:ss` |
+| 导入校验 | 与对应 API 一致，失败行跳过并返回行号与稳定原因 |
+
+#### 6.5.2 报表型 CSV
+
+用于历史数据等面向用户的下载，不要求再次导入。
+
+- 允许本地化标题和动态点位列。
+- 重复点位名称追加 UUID 前 8 位，保证列名唯一。
+- 缺失或不展示的值使用 `—`，质量列使用 `good | bad | —`。
+- 文件名由服务端使用已解析参数重新格式化，只允许 ASCII 字母、数字、下划线、短横线和点。
+- 文件扩展名统一为 `.csv`。
 
 ---
 
@@ -551,7 +596,8 @@ logger.Info("设备连接成功",
 | 采集点/写入点创建/修改/删除 | INFO |
 | 写入操作 | INFO |
 | 采集引擎启停 | INFO |
-| 设备连接/断开 | WARN |
+| 设备连接成功 | INFO |
+| 设备断开或连接失败 | WARN |
 | 重连失败 | WARN |
 | 协议驱动异常 | ERROR |
 
@@ -562,11 +608,19 @@ logger.Info("设备连接成功",
 ### 8.1 SQL 注入防护
 
 ```go
-// ✅ 正确：使用参数化查询，并显式声明返回字段
+// ✅ 用户值使用参数化查询
 db.QueryContext(ctx, "SELECT id, name FROM devices WHERE name = $1", name)
-
-// ✗ 禁止：字符串拼接 SQL
 ```
+
+TDengine 动态子表名按以下流程处理：
+
+1. 解析并验证标准 UUID；
+2. 转为小写、移除连字符并加 `p_`；
+3. 校验 `^p_[0-9a-f]{32}$`；
+4. 使用驱动的安全标识符引用能力构造 SQL；
+5. 时间和值条件继续使用参数绑定。
+
+禁止把请求参数、点位名称、分组名称或任意未验证字符串拼入 SQL。
 
 ### 8.2 输入校验
 
@@ -575,15 +629,16 @@ db.QueryContext(ctx, "SELECT id, name FROM devices WHERE name = $1", name)
 | IP 地址 | 使用 `net.ParseIP()` 或正则校验合法格式 |
 | 端口号 | 范围 1~65535 |
 | 时间范围 | 结束时间必须晚于开始时间，最大跨度不超过 31 天 |
+| 曲线结果 | `max_samples` 范围 100~10000，默认 2000 |
 | 分页 | page >= 1, page_size <= 100 |
-| 文件名 | 导出的 CSV 文件名不含用户输入（防止路径穿越） |
+| 文件名 | 不直接拼接原始用户输入；解析后由服务端重新格式化为安全文件名 |
 
 ### 8.3 写入安全
 
 - **写入开关校验**：在 Service 层校验 `write_enabled=true`
-- **写入来源校验**：校验 `write_source` 与请求 `source` 的匹配关系
 - **回读验证**：写入后必须执行回读确认
-- **写入权限**：人工写入需登录鉴权；程序自动写入需 API Token
+- **人工写入记录**：当前阶段写入接口仅支持人工写入；Service 固定记录 `source=manual`、`operator=null`，请求体不得传入这两个字段
+- **访问边界**：未实施身份认证前，写入 API 只允许部署在受信任的内部网络；接入身份认证后再补充权限与操作者归属
 
 ### 8.4 配置安全
 
@@ -615,10 +670,10 @@ db.QueryContext(ctx, "SELECT id, name FROM devices WHERE name = $1", name)
 
 | 检查项 | 说明 |
 |--------|------|
-| 模块边界是否清晰 | 是否有 Handler 直接调用其他模块的 Repo |
+| 模块边界是否清晰 | 是否有跨模块直接调用 Repository、ORM 模型或访问其他模块的数据表 |
 | 分层是否遵守 | Handler → Service → Repository 单向依赖 |
 | 是否引入循环依赖 | 包间依赖不能成环 |
-| 扩展点是否留好 | 协议驱动是否遵循 ProtocolDriver 接口 |
+| 扩展点是否留好 | 协议驱动是否使用 Factory/Connection 模型，且每设备连接隔离 |
 
 #### 功能层面
 
@@ -634,14 +689,14 @@ db.QueryContext(ctx, "SELECT id, name FROM devices WHERE name = $1", name)
 |--------|------|
 | N+1 查询 | 列表查询时是否 batch 加载关联数据 |
 | 索引 | 新增查询条件是否添加了对应的数据库索引 |
-| 分页 | 列表接口是否都有分页，且 page_size 有上限约束 |
+| 分页/采样 | 列表是否分页；历史曲线是否有 max_samples 和降采样 |
 | 连接池 | 数据库连接是否使用了连接池 |
 
 #### 安全层面
 
 | 检查项 | 说明 |
 |--------|------|
-| SQL 注入 | 全库搜索字符串拼接的 SQL 语句 |
+| SQL 注入 | 用户值是否参数化；动态子表名是否只由 UUID 派生并通过白名单 |
 | 参数校验 | 所有用户输入是否都通过了校验 |
 | 敏感信息泄露 | 错误信息是否直接返回给前端 |
 | 路径穿越 | 文件操作的路径是否使用用户输入构造 |
@@ -703,7 +758,7 @@ type Device struct {
 
 ---
 
-> 本文档版本：v1.1
+> 本文档版本：v1.2
 > 最后更新：2026-07-11
 > 适用范围：污水厂智能控制系统全部后端（Go）、前端（Vue 3）代码
 >

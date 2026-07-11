@@ -2,6 +2,8 @@
 
 > 本文档属于《污水厂智能控制平台》的一部分，详细描述数据管理模块的功能、数据模型、API接口和业务逻辑，细度可达直接开发级别。
 
+> 跨文档契约发生冲突时，必须遵循《[一致性决策基线](一致性决策基线.md)》；该文件的已采纳决策优先于本文旧表述。
+
 ---
 
 ## 目录
@@ -40,7 +42,7 @@
 
 ```
 设备 (Device)                  ← 一个物理PLC或Modbus设备
- ├── 采集点 (CollectPoint)     ← 从该设备读取的测点（N个）
+ ├── 采集点 (CollectionPoint)     ← 从该设备读取的测点（N个）
  └── 写入点 (WritePoint)       ← 向该设备写入的测点（M个）
 
 采集点 ≠ 写入点，两者分开管理，独立配置。
@@ -110,34 +112,16 @@ CREATE UNIQUE INDEX idx_devices_name ON devices(name) WHERE deleted = FALSE;
 ```json
 {
     "unit_id": 1,
-    "byte_order": "ABCD",
-    "word_order": "AB"
+    "float32_order": "ABCD"
 }
 ```
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| unit_id | int | 是 | Modbus从站地址（站号），范围1~247 |
-| byte_order | string | 是 | 32位浮点数（REAL）的字节序，详见下文 |
-| word_order | string | 是 | 32位浮点数（REAL）的字序，详见下文 |
+| unit_id | int | 是 | Modbus从站地址，范围1~247 |
+| float32_order | string | 是 | REAL 占用两个寄存器时的四字节排列：`ABCD`、`BADC`、`CDAB`、`DCBA`；默认 `ABCD` |
 
-**byte_order 和 word_order 说明**：
-
-对于Modbus中占用2个寄存器的REAL类型（32位浮点数），解析时需指定字节顺序：
-
-| byte_order | 说明 | 示例（4字节: 0x41 0xA0 0x00 0x00） |
-|------------|------|--------------------------------------|
-| `ABCD` | 大端序（默认） | 41A00000 → 20.0 |
-| `BADC` | 字节交换 | A0410000 → 乱码（通常不推荐） |
-| `CDAB` | 字内字节交换 | 000041A0 → 20.0（某些PLC的格式） |
-| `DCBA` | 小端序 | 0000A041 → 乱码（通常不推荐） |
-
-| word_order | 说明 | 示例（4字节: 0x41 0xA0 0x00 0x00） |
-|------------|------|--------------------------------------|
-| `AB` | 正常字序 | 寄存器1=41A0, 寄存器2=0000 → 20.0 |
-| `BA` | 字交换 | 寄存器1=0000, 寄存器2=41A0 → 20.0（某些PLC的格式） |
-
-**最终解析公式**：按照 `word_order` 决定字的排列，再按 `byte_order` 决定每个字内的字节顺序。
+`float32_order` 直接描述从两个寄存器读取到的四个字节如何重排为 IEEE-754 32 位浮点数，不再叠加第二个 `word_order` 字段，避免字节交换与字交换职责重叠。INT 类型按标准 16 位寄存器顺序解析。
 
 #### 2.1.4 设备的业务状态
 
@@ -147,7 +131,7 @@ CREATE UNIQUE INDEX idx_devices_name ON devices(name) WHERE deleted = FALSE;
 |------|------|
 | enabled=true | 设备启用，采集引擎会为该设备建立连接并执行采集任务 |
 | enabled=false | 设备禁用，采集引擎跳过该设备，已有连接断开 |
-| deleted=true | 逻辑删除，数据保留但不再显示和使用 |
+| deleted=true | 逻辑删除；不再出现在数据管理活动列表或运行时任务中，但保留期内历史数据仍可在历史模块只读查询 |
 
 **运行时连接状态（采集引擎内存维护，不落库）**：
 
@@ -234,17 +218,34 @@ Response (201)：
 
 **PUT /api/v1/devices/{id}** — 修改设备
 
-- 与新增使用相同的请求体结构
-- 修改后，如果设备正在运行中，采集引擎应自动重新连接
-- 如果修改了 enabled 字段（启用/禁用），响应中的 `connection_status` 同步变化：
-  - 从 enabled=false 改为 true → 采集引擎尝试连接，`connection_status` 在异步连接完成前为 `disconnected`
-  - 从 enabled=true 改为 false → `connection_status` 立即变为 `disabled`
+PUT 使用完整替换语义，以下字段全部必填：
+
+```json
+{
+    "name": "一期曝气柜PLC",
+    "protocol_type": "S7",
+    "enabled": true,
+    "host": "192.168.1.100",
+    "port": 102,
+    "connect_timeout": 5,
+    "reconnect_interval": 10,
+    "protocol_config": {
+        "rack": 0,
+        "slot": 1
+    }
+}
+```
+
+- 校验规则与新增一致，额外要求 `enabled` 为布尔值。
+- 修改连接参数或协议配置后，Service 在事务提交后发布配置变更事件；采集引擎断开旧连接并使用新参数重连。
+- `enabled=false` 时运行时状态立即进入 `disabled`；`enabled=true` 后先返回 `disconnected`，连接成功后变为 `connected`。
+- 配置变更正常情况下 1 秒内生效，5 秒全量校对保证最终一致。
 
 **DELETE /api/v1/devices/{id}** — 逻辑删除
 
 - 将该设备的 deleted 字段设为 true
 - 如果设备正在运行中，采集引擎应立即停止该设备的所有采集任务并断开连接
-- 同时该设备下所有采集点和写入点也一并逻辑删除
+- 同时该设备下所有采集点和写入点也一并逻辑删除；已有 TDengine 历史数据不删除，作为归档数据继续只读查询
 
 **POST /api/v1/devices/export** — 导出设备列表为CSV
 
@@ -252,9 +253,11 @@ Request body：
 
 ```json
 {
-    "ids": ["uuid1", "uuid2"]  // 可选，不传则导出全部
+    "ids": ["uuid1", "uuid2"]
 }
 ```
+
+`ids` 可选；省略时导出全部符合当前权限和逻辑删除规则的设备。
 
 Response：CSV文件（Content-Type: text/csv; charset=utf-8-sig）
 
@@ -263,7 +266,7 @@ CSV格式定义：
 ```csv
 name,protocol_type,host,port,connect_timeout,reconnect_interval,protocol_config,enabled
 一期曝气柜PLC,S7,192.168.1.100,102,5,10,"{""rack"":0,""slot"":1}",TRUE
-二期加药间PLC,MODBUS_TCP,192.168.2.50,502,5,10,"{""unit_id"":1,""byte_order"":""ABCD"",""word_order"":""AB""}",TRUE
+二期加药间PLC,MODBUS_TCP,192.168.2.50,502,5,10,"{""unit_id"":1,""float32_order"":""ABCD""}",TRUE
 ```
 
 注意：
@@ -323,10 +326,45 @@ Response (200)：
 ```
 
 `connection_status` 字段说明：
-- 由 API Handler 从采集引擎运行时状态中获取后组装到响应中
+- 由设备 Service 通过 `DeviceRuntimeStatusProvider` 获取运行时状态后组装；Handler 不直接访问采集引擎
 - 枚举值：`connected`、`disconnected`、`disabled`
 - enabled=false 时始终为 `disabled`，无需查询引擎运行时状态
 - enabled=true 时，如果采集引擎未运行或查询不到该设备状态，统一返回 `disconnected`
+
+**GET /api/v1/devices/{id}** 返回与列表项相同的完整设备对象；不存在或已逻辑删除时返回 HTTP 404、`code=40004`。
+
+**GET /api/v1/devices/protocols** 返回注册表中的协议工厂元数据：
+
+```json
+{
+    "code": 0,
+    "message": "success",
+    "data": {
+        "items": [
+            {"protocol_type":"S7","default_port":102,"config_schema":{"type":"object"}},
+            {"protocol_type":"MODBUS_TCP","default_port":502,"config_schema":{"type":"object"}}
+        ]
+    }
+}
+```
+
+设备导入结果使用统一结构：
+
+```json
+{
+    "code": 0,
+    "message": "success",
+    "data": {
+        "total": 10,
+        "created": 6,
+        "updated": 3,
+        "failed": 1,
+        "errors": [{"row":8,"field":"host","message":"无效的IP地址或域名"}]
+    }
+}
+```
+
+设备 CSV 成功时直接返回文件流，不使用 JSON envelope；失败时返回统一 JSON 错误。
 
 ---
 
@@ -344,33 +382,59 @@ CREATE TABLE collection_points (
     device_id           UUID NOT NULL REFERENCES devices(id),
     enabled             BOOLEAN NOT NULL DEFAULT TRUE,
     deleted             BOOLEAN NOT NULL DEFAULT FALSE,
-    
-    -- 采集地址（协议驱动自行解析）
+
     address             VARCHAR(256) NOT NULL,
-    
-    -- 数据类型
     data_type           VARCHAR(16) NOT NULL,  -- 'BOOL', 'INT', 'REAL'
-    
-    -- 采集参数
-    collect_interval    INTEGER NOT NULL DEFAULT 1,  -- 单位：秒，最小值1
+    unit                VARCHAR(32),
+    valid_min           DOUBLE PRECISION,
+    valid_max           DOUBLE PRECISION,
+
+    collect_interval    INTEGER NOT NULL DEFAULT 1 CHECK (collect_interval >= 1),
     store_history       BOOLEAN NOT NULL DEFAULT TRUE,
-    history_interval    INTEGER NOT NULL DEFAULT 1,  -- 单位：分钟，最小值1
-    
+    history_interval    INTEGER NOT NULL DEFAULT 1 CHECK (history_interval BETWEEN 1 AND 1440),
+    history_started_at  TIMESTAMP WITH TIME ZONE,
+
     created_at          TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     created_by          VARCHAR(64),
-    updated_by          VARCHAR(64)
+    updated_by          VARCHAR(64),
+
+    CHECK (valid_min IS NULL OR valid_max IS NULL OR valid_min <= valid_max)
 );
 
--- 全局唯一名称（逻辑删除的记录不参与）
-CREATE UNIQUE INDEX idx_collection_points_name ON collection_points(name) WHERE deleted = FALSE;
-
--- 按设备查询
-CREATE INDEX idx_collection_points_device ON collection_points(device_id) WHERE deleted = FALSE;
-
--- 按分组查询
-CREATE INDEX idx_collection_points_group ON collection_points(group_name) WHERE deleted = FALSE;
+CREATE UNIQUE INDEX idx_collection_points_name
+    ON collection_points(name) WHERE deleted = FALSE;
+CREATE INDEX idx_collection_points_device_id
+    ON collection_points(device_id) WHERE deleted = FALSE;
+CREATE INDEX idx_collection_points_group_name
+    ON collection_points(group_name) WHERE deleted = FALSE;
 ```
+
+`history_started_at` 在点位首次准备写入 TDengine 前设置。一旦非空，`device_id` 和 `data_type` 不可修改；需要改变设备归属或数据类型时必须新建点位，防止同一历史子表混入不同语义的数据。
+
+#### 3.1.1.1 历史模块只读元数据接口
+
+设备与采集点配置由数据管理模块拥有。历史模块必须调用公开的进程内只读领域接口，不得直接查询 `devices`、`collection_points` 表或调用数据管理 Repository。
+
+接口能力：
+
+```go
+type HistoryPointMetadataOptions struct {
+    IncludeArchived bool
+}
+
+ListHistoryPointMetadata(ctx context.Context, opts HistoryPointMetadataOptions) ([]HistoryPointMetadata, error)
+GetHistoryPointMetadata(ctx context.Context, pointIDs []uuid.UUID, includeArchived bool) ([]HistoryPointMetadata, error)
+```
+
+稳定 DTO 至少包含：
+
+- 点位 ID、名称、分组、单位、设备 ID/名称、数据类型；
+- `enabled`、`deleted`、设备启用/删除状态、`store_history`、`history_interval`；
+- `history_started_at`；
+- 可空 `latest_value`，结构为 `{value, quality, quality_reason, ts}`。
+
+`IncludeArchived=true` 时必须返回逻辑删除或禁用但配置记录仍保留的点位。历史模块再结合 TDengine 是否存在记录确定 `has_history_data` 和 `lifecycle_status`。
 
 #### 3.1.2 各协议的地址格式
 
@@ -424,7 +488,7 @@ CREATE INDEX idx_collection_points_group ON collection_points(group_name) WHERE 
 
 对于 BOOL 类型，每个地址对应一个位（线圈/离散输入）。
 对于 INT 类型，每个地址对应1个寄存器（16位）。
-对于 REAL 类型，每个地址对应2个连续寄存器（32位），读取时从指定地址连续读2个寄存器，按 device 中配置的 byte_order 和 word_order 解析。
+对于 REAL 类型，每个地址对应2个连续寄存器（32位），读取时从指定地址连续读2个寄存器，按 device 中配置的 float32_order 解析。
 
 #### 3.1.3 分组机制
 
@@ -440,7 +504,7 @@ CREATE INDEX idx_collection_points_group ON collection_points(group_name) WHERE 
 
 实时数据不是存储在数据库中的字段，而是采集引擎运行时维护在内存中的最新值。
 
-API 返回采集点时，应附带该点的最新采集值（如果存在）：
+API 返回采集点时应附带最新采集值；没有缓存时 `latest_value` 固定为 `null`：
 
 ```json
 {
@@ -449,6 +513,7 @@ API 返回采集点时，应附带该点的最新采集值（如果存在）：
     "latest_value": {
         "value": 2.35,
         "quality": "good",
+        "quality_reason": null,
         "ts": "2026-07-09T10:00:01+08:00"
     }
 }
@@ -482,6 +547,9 @@ Request body：
     "device_id": "uuid-of-device",
     "address": "DB2.10",
     "data_type": "REAL",
+    "unit": "mg/L",
+    "valid_min": 0,
+    "valid_max": 20,
     "collect_interval": 1,
     "store_history": true,
     "history_interval": 1
@@ -494,16 +562,39 @@ Request body：
 - device_id：必填，必须引用一个已存在的设备（且deleted=false）
 - address：必填，1~256字符，根据设备协议类型校验格式
 - data_type：必填，枚举值：`BOOL`、`INT`、`REAL`
+- unit：可选，0~32字符；用于历史表格和图表展示
+- valid_min / valid_max：可选；同时提供时必须 valid_min <= valid_max，超范围值记为 bad 但保留原始值
 - collect_interval：必填，最小值1（秒）
 - store_history：可选，默认true
-- history_interval：当store_history=true时必填，最小值1（分钟）
+- history_interval：当 store_history=true 时必填，必须为 1~1440 的整数（分钟）；store_history=false 时可省略并使用默认值 1，若提供仍须符合该范围
 - address 和 data_type 的兼容性校验：
   - S7协议：BOOL类型必须包含bit位（如 `DB2.10.0`），INT/REAL类型不能包含bit位
   - Modbus协议：00001/10001 地址只能使用BOOL类型，30001/40001 地址只能使用INT/REAL类型
 
 **PUT /api/v1/collection-points/{id}** — 修改采集点
 
-- 修改后，如果采集引擎正在运行中，需要动态更新采集任务配置
+PUT 使用完整替换语义，请求字段与新增一致，并额外要求 `enabled`：
+
+```json
+{
+    "name": "曝气池DO_01",
+    "group_name": "曝气池",
+    "device_id": "uuid-of-device",
+    "enabled": true,
+    "address": "DB2.10",
+    "data_type": "REAL",
+    "unit": "mg/L",
+    "valid_min": 0,
+    "valid_max": 20,
+    "collect_interval": 1,
+    "store_history": true,
+    "history_interval": 5
+}
+```
+
+- `history_started_at` 非空时，修改 `device_id` 或 `data_type` 返回 HTTP 409、`code=41009`。
+- 名称、分组、地址、单位、有效范围、采集周期和历史间隔可以修改。
+- Service 在事务提交后发布配置变更事件，采集引擎停止旧任务并按新配置启动；5 秒内保证最终生效。
 
 **DELETE /api/v1/collection-points/{id}** — 逻辑删除
 
@@ -544,6 +635,9 @@ Response (200)：
                 "protocol_type": "S7",
                 "address": "DB2.10",
                 "data_type": "REAL",
+                "unit": "mg/L",
+                "valid_min": 0,
+                "valid_max": 20,
                 "collect_interval": 1,
                 "store_history": true,
                 "history_interval": 1,
@@ -551,6 +645,7 @@ Response (200)：
                 "latest_value": {
                     "value": 2.35,
                     "quality": "good",
+                    "quality_reason": null,
                     "ts": "2026-07-09T10:00:01+08:00"
                 },
                 "created_at": "...",
@@ -593,10 +688,10 @@ Response (200)：
 CSV格式定义：
 
 ```csv
-name,group_name,device_name,address,data_type,collect_interval,store_history,history_interval,enabled
-曝气池DO_01,曝气池,一期曝气柜PLC,DB2.10,REAL,1,TRUE,1,TRUE
-进水pH,进水仪表,进水仪表柜PLC,DB1.0,REAL,5,TRUE,5,TRUE
-风机运行状态,曝气池,一期曝气柜PLC,M4.0,BOOL,1,TRUE,1,TRUE
+name,group_name,device_name,address,data_type,unit,valid_min,valid_max,collect_interval,store_history,history_interval,enabled
+曝气池DO_01,曝气池,一期曝气柜PLC,DB2.10,REAL,mg/L,0,20,1,TRUE,1,TRUE
+进水pH,进水仪表,进水仪表柜PLC,DB1.0,REAL,pH,0,14,5,TRUE,5,TRUE
+风机运行状态,曝气池,一期曝气柜PLC,M4.0,BOOL,,,,1,TRUE,1,TRUE
 ```
 
 注意：
@@ -606,8 +701,14 @@ name,group_name,device_name,address,data_type,collect_interval,store_history,his
 
 **POST /api/v1/collection-points/import** — 从CSV导入
 
-- 导入逻辑：以 name 为唯一标识，存在则更新，不存在则新增
-- 需先校验 device_name 是否有效
+- 导入逻辑：以 name 为唯一标识，存在则更新，不存在则新增。
+- 先校验 `device_name`，再按对应协议校验地址和数据类型。
+- 若更新已有点位且 `history_started_at` 非空，CSV 不得改变 `device_name` 对应的设备或 `data_type`。
+- 响应沿用设备导入的 `{total,created,updated,failed,errors}` 结构。
+
+**GET /api/v1/collection-points/{id}** 返回列表项的完整对象，并包含 `history_started_at`；无实时缓存时 `latest_value=null`。
+
+采集点 CSV 成功时直接返回文件流，不使用 JSON envelope；失败时返回统一 JSON 错误。
 
 ---
 
@@ -624,25 +725,27 @@ CREATE TABLE write_points (
     group_name          VARCHAR(64) NOT NULL DEFAULT 'default',
     device_id           UUID NOT NULL REFERENCES devices(id),
     enabled             BOOLEAN NOT NULL DEFAULT TRUE,
-    write_enabled       BOOLEAN NOT NULL DEFAULT FALSE,   -- 是否允许写入
-    write_source        VARCHAR(16) NOT NULL DEFAULT 'manual',  -- 写入来源: 'manual'（仅人工）, 'auto'（仅程序自动）, 'both'（两者均可）
+    write_enabled       BOOLEAN NOT NULL DEFAULT FALSE,
     deleted             BOOLEAN NOT NULL DEFAULT FALSE,
-    
-    -- 写入地址（协议驱动自行解析，格式与采集点相同）
+
     address             VARCHAR(256) NOT NULL,
-    
-    -- 数据类型
     data_type           VARCHAR(16) NOT NULL,  -- 'BOOL', 'INT', 'REAL'
-    
+    unit                VARCHAR(32),
+    readback_tolerance  DOUBLE PRECISION NOT NULL DEFAULT 0.0001
+                        CHECK (readback_tolerance >= 0),
+
     created_at          TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     created_by          VARCHAR(64),
     updated_by          VARCHAR(64)
 );
 
-CREATE UNIQUE INDEX idx_write_points_name ON write_points(name) WHERE deleted = FALSE;
-CREATE INDEX idx_write_points_device ON write_points(device_id) WHERE deleted = FALSE;
-CREATE INDEX idx_write_points_group ON write_points(group_name) WHERE deleted = FALSE;
+CREATE UNIQUE INDEX idx_write_points_name
+    ON write_points(name) WHERE deleted = FALSE;
+CREATE INDEX idx_write_points_device_id
+    ON write_points(device_id) WHERE deleted = FALSE;
+CREATE INDEX idx_write_points_group_name
+    ON write_points(group_name) WHERE deleted = FALSE;
 ```
 
 #### 4.1.2 与采集点的区别
@@ -650,19 +753,18 @@ CREATE INDEX idx_write_points_group ON write_points(group_name) WHERE deleted = 
 | 维度 | 采集点 | 写入点 |
 |------|--------|--------|
 | 方向 | 从PLC读取 | 向PLC写入 |
-| 存储历史 | 支持（可配置写入TDengine） | 不支持（只记录操作日志） |
-| 采集周期 | 有 | 无（指令触发，非周期执行） |
-| 写入开关 | 无 | 有（write_enabled + write_source） |
-| 写入来源 | 无 | 支持人工（manual）和程序自动（auto）两种来源 |
-| 采集引擎 | 周期性调度 | 无（等待API触发） |
+| 存储历史 | 支持 | 不支持，只记录操作日志 |
+| 周期 | 周期采集 | API 指令触发 |
+| 写入开关 | 无 | `write_enabled` |
+| 写入来源 | 无 | 当前阶段仅人工写入，服务端固定为 `manual` |
+| 回读 | 无 | 写入后必须回读验证 |
 
-#### 4.1.3 地址格式
+#### 4.1.3 地址与回读规则
 
-与采集点完全一致，参考 [3.1.2](#312-各协议的地址格式)。
-
-注意：写入点必须使用可写的地址类型：
-- S7协议：DB、M、Q 类型可写（I类型为输入，不可写）
-- Modbus协议：00001（线圈）和 40001（保持寄存器）可写；10001（离散输入）和 30001（输入寄存器）不可写
+- 地址格式与采集点一致，但只允许可写区域：S7 的 DB/M/Q，Modbus 的 Coil/保持寄存器。
+- BOOL、INT 回读必须严格相等。
+- REAL 使用 `abs(readback-target) <= readback_tolerance`；默认容差 0.0001。
+- 同一设备的采集、写入和回读通过设备连接命令队列串行执行，避免协议客户端并发冲突。
 
 ### 4.2 RESTful API
 
@@ -673,170 +775,128 @@ CREATE INDEX idx_write_points_group ON write_points(group_name) WHERE deleted = 
 | GET | /api/v1/write-points | 获取写入点列表 |
 | POST | /api/v1/write-points | 新增写入点 |
 | GET | /api/v1/write-points/{id} | 获取单个写入点详情 |
-| PUT | /api/v1/write-points/{id} | 修改写入点 |
+| PUT | /api/v1/write-points/{id} | 完整修改写入点 |
 | DELETE | /api/v1/write-points/{id} | 逻辑删除 |
-| POST | /api/v1/write-points/export | 导出CSV |
-| POST | /api/v1/write-points/import | 从CSV导入 |
-| POST | /api/v1/write-points/{id}/write | 执行写入操作（人工/程序自动均使用此接口） |
+| POST | /api/v1/write-points/export | 导出配置 CSV |
+| POST | /api/v1/write-points/import | 从配置 CSV 导入 |
+| POST | /api/v1/write-points/{id}/write | 执行人工写入 |
 | GET | /api/v1/write-logs | 查询写入操作日志 |
 
-**GET /api/v1/write-logs** — 查询写入操作日志
+#### 4.2.2 写入点 CRUD
 
-Query parameters：
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| page | int | 否 | 默认1 |
-| page_size | int | 否 | 默认20，最大100 |
-| point_id | string | 否 | 按写入点筛选 |
-| device_id | string | 否 | 按设备筛选 |
-| source | string | 否 | 筛选 manual/auto |
-| result | string | 否 | 筛选 success/failed |
-| start_time | string | 否 | 开始时间 |
-| end_time | string | 否 | 结束时间 |
-| keyword | string | 否 | 搜索 operator 或 point_name |
-
-Response (200)：
+新增请求：
 
 ```json
 {
-    "code": 0,
-    "message": "success",
-    "data": {
-        "total": 500,
-        "page": 1,
-        "page_size": 20,
-        "items": [
-            {
-                "id": "uuid",
-                "point_id": "uuid",
-                "point_name": "加药泵频率",
-                "device_id": "uuid",
-                "device_name": "一期加药间PLC",
-                "address": "DB2.10",
-                "data_type": "REAL",
-                "source": "manual",
-                "target_value": "20.5",
-                "readback_value": "20.5",
-                "result": "success",
-                "error_message": null,
-                "operator": "张三",
-                "reason": "AI推荐加药量调整",
-                "created_at": "2026-07-09T10:00:00+08:00"
-            }
-        ]
-    }
+    "name": "加药泵频率",
+    "group_name": "加药间",
+    "device_id": "uuid-of-device",
+    "enabled": true,
+    "write_enabled": false,
+    "address": "DB2.10",
+    "data_type": "REAL",
+    "unit": "Hz",
+    "readback_tolerance": 0.01
 }
 ```
 
-#### 4.2.2 写入接口详细定义
+- POST 中 `enabled` 可省略，默认 true；PUT 中全部字段必填。
+- 名称全局唯一；设备必须存在且未删除；地址必须可写并与数据类型兼容。
+- `readback_tolerance` 仅对 REAL 生效，范围 0~1,000,000。
+- GET 列表支持 `page`、`page_size`、`keyword`、`device_id`、`group_name`、`data_type`、`enabled`、`write_enabled`。
+- DELETE 设置 `deleted=true` 并立即拒绝新的写入请求。
 
-**POST /api/v1/write-points/{id}/write** — 执行写入
+成功响应中的写入点对象包含上述字段及 `id`、`device_name`、`protocol_type`、`created_at`、`updated_at`。
 
-Request body（人工写入）：
+配置 CSV：
+
+```csv
+name,group_name,device_name,address,data_type,unit,enabled,write_enabled,readback_tolerance
+加药泵频率,加药间,一期加药间PLC,DB2.10,REAL,Hz,TRUE,FALSE,0.01
+```
+
+导入以 `name` 为唯一标识，存在则更新；失败结果返回行号、字段和稳定错误原因。写入点 CSV 成功时直接返回文件流，不使用 JSON envelope；失败时返回统一 JSON 错误。
+
+#### 4.2.3 执行写入
+
+**POST /api/v1/write-points/{id}/write**
 
 ```json
 {
     "value": 20.5,
-    "source": "manual",
-    "operator": "张三",
-    "reason": "AI推荐加药量调整"
+    "reason": "工艺调整"
 }
 ```
 
-Request body（程序自动写入）：
+校验：
 
-```json
-{
-    "value": 25.0,
-    "source": "auto",
-    "operator": "ai-engine:aeration-model-v1",
-    "reason": "曝气模型推理结果：进水负荷上升，需要增加风量"
-}
-```
+- BOOL 只接受 JSON boolean；INT 只接受整数；REAL 接受 JSON number。
+- `reason` 可选，最多 500 字符。
+- 请求体不得包含 `source` 或 `operator`；服务端固定记录 `source=manual`、`operator=null`。
 
-校验规则：
-- value：必填，类型必须与写入点的 data_type 匹配
-  - BOOL：true/false
-  - INT：整数
-  - REAL：浮点数
-- source：必填，枚举值：`manual`（人工）、`auto`（程序自动）
-- operator：必填
-  - 当 source=manual 时，操作人标识（如 "张三"）
-  - 当 source=auto 时，调用方标识（如 "ai-engine:aeration-model-v1"）
-- reason：可选，操作原因
-- 写入来源校验：写入点的 write_source 字段必须与请求中的 source 匹配
-  - write_source=manual：仅允许 source=manual
-  - write_source=auto：仅允许 source=auto
-  - write_source=both：manual 和 auto 都允许
+执行流程：
 
-写入流程：
+1. 校验点位、设备、`enabled` 和 `write_enabled`；
+2. 通过设备级连接队列写入；
+3. 回读并按数据类型验证；不一致时重试一次；
+4. 无论成功、失败或超时都写入 `write_logs`；
+5. 返回稳定业务结果，原始协议错误只写服务端日志。
 
-```
-1. 校验写入点是否存在且 write_enabled=true
-2. 校验请求中的 source 是否在写入点 write_source 允许的范围内
-3. 校验值类型与 data_type 匹配
-4. 连接PLC（如果已连接则复用）
-5. 写入地址（调用协议驱动的 Write 方法）
-6. 回读验证（读取刚写入的地址，确认值一致）
-   - 如果回读值与写入值一致：写入成功
-   - 如果回读值与写入值不一致：重试一次，仍不一致则标记为失败
-7. 记录操作日志到 write_logs 表
-8. 返回写入结果
-```
-
-Response (200)：
+成功：HTTP 200、`code=0`。
 
 ```json
 {
     "code": 0,
     "message": "success",
     "data": {
-        "id": "uuid",
+        "write_log_id": "uuid",
         "point_name": "加药泵频率",
+        "data_type": "REAL",
         "value": 20.5,
+        "readback_value": 20.50001,
         "result": "success",
-        "readback_value": 20.5,
         "ts": "2026-07-09T10:00:00+08:00"
     }
 }
 ```
 
-写入失败时：
+失败：HTTP 502、`code=51001`；超时：HTTP 504、`code=51002`。失败响应 `data` 至少包含 `write_log_id`、`result` 和稳定 `error_message`。
+
+#### 4.2.4 写入日志
+
+查询参数：
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| page | int | 否 | 默认1，最大 page_size=100 |
+| point_id | UUID | 否 | 按写入点筛选 |
+| device_id | UUID | 否 | 按设备筛选 |
+| result | string | 否 | `success | failed | timeout` |
+| start_time / end_time | string | 否 | ISO 8601，最大跨度31天 |
+| keyword | string | 否 | 搜索 point_name |
+
+API 根据 `data_type` 把数据库 TEXT 转换为 JSON boolean/number：
 
 ```json
 {
-    "code": 0,
-    "message": "success",
-    "data": {
-        "id": "uuid",
-        "point_name": "加药泵频率",
-        "value": 20.5,
-        "result": "failed",
-        "error": "回读值不匹配: 期望20.5, 实际18.3",
-        "ts": "2026-07-09T10:00:00+08:00"
-    }
+    "id": "uuid",
+    "point_id": "uuid",
+    "point_name": "加药泵频率",
+    "device_id": "uuid",
+    "device_name": "一期加药间PLC",
+    "address": "DB2.10",
+    "data_type": "REAL",
+    "unit": "Hz",
+    "source": "manual",
+    "target_value": 20.5,
+    "readback_value": 20.50001,
+    "result": "success",
+    "error_message": null,
+    "operator": null,
+    "reason": "工艺调整",
+    "created_at": "2026-07-09T10:00:00+08:00"
 }
 ```
-
-写入超时：
-
-```json
-{
-    "code": 0,
-    "message": "success",
-    "data": {
-        "id": "uuid",
-        "point_name": "加药泵频率",
-        "value": 20.5,
-        "result": "timeout",
-        "error": "写入操作超时: 设备无响应超过30秒",
-        "ts": "2026-07-09T10:00:00+08:00"
-    }
-}
-```
-
-#### 4.2.3 写入操作日志表：write_logs
 
 ```sql
 CREATE TABLE write_logs (
@@ -847,23 +907,21 @@ CREATE TABLE write_logs (
     device_name     VARCHAR(128) NOT NULL,
     address         VARCHAR(256) NOT NULL,
     data_type       VARCHAR(16) NOT NULL,
-    
-    source          VARCHAR(16) NOT NULL,         -- 'manual' 或 'auto'
-    target_value    TEXT NOT NULL,                -- 目标值（统一存为字符串）
-    readback_value  TEXT,                         -- 回读值
-    result          VARCHAR(16) NOT NULL,         -- 'success', 'failed', 'timeout'
+    unit            VARCHAR(32),
+
+    source          VARCHAR(16) NOT NULL DEFAULT 'manual' CHECK (source = 'manual'),
+    target_value    TEXT NOT NULL,
+    readback_value  TEXT,
+    result          VARCHAR(16) NOT NULL CHECK (result IN ('success', 'failed', 'timeout')),
     error_message   TEXT,
-    
-    operator        VARCHAR(64) NOT NULL,
-    reason          TEXT,
-    
+    operator        VARCHAR(64),
+    reason          VARCHAR(500),
     created_at      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_write_logs_point ON write_logs(point_id);
-CREATE INDEX idx_write_logs_device ON write_logs(device_id);
-CREATE INDEX idx_write_logs_source ON write_logs(source);
-CREATE INDEX idx_write_logs_time ON write_logs(created_at DESC);
+CREATE INDEX idx_write_logs_point_id ON write_logs(point_id);
+CREATE INDEX idx_write_logs_device_id ON write_logs(device_id);
+CREATE INDEX idx_write_logs_created_at ON write_logs(created_at DESC);
 ```
 
 ---
@@ -872,7 +930,9 @@ CREATE INDEX idx_write_logs_time ON write_logs(created_at DESC);
 
 ### 5.1 架构概述
 
-采集引擎是后台常驻服务，负责执行实际的数据采集任务。
+采集引擎是嵌入 Web 服务进程的后台常驻组件，负责执行实际的数据采集任务。
+
+运行模型采用**单进程嵌入式**：`cmd/server/main.go` 是唯一的生产可执行入口。服务启动时初始化采集引擎并启动其后台协程；服务关闭时先停止接收新请求，再停止采集引擎并释放设备连接。采集引擎不作为独立的 `cmd/collector` 进程运行，因此 API 服务可通过进程内依赖访问其运行时状态。
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -883,7 +943,7 @@ CREATE INDEX idx_write_logs_time ON write_logs(created_at DESC);
 │  │ (Connection   │  │ (Scheduler)  │                   │
 │  │  Manager)     │  └──────┬───────┘                   │
 │  └──────┬───────┘         │                            │
-│         │                 │ 每个采集点的独立协程/任务     │
+│         │                 │ 有界 worker pool 中的采集任务     │
 │         │         ┌───────▼────────┐                   │
 │         │         │  采集点执行单元   │                  │
 │         │         │  (Point Runner) │                  │
@@ -901,55 +961,44 @@ CREATE INDEX idx_write_logs_time ON write_logs(created_at DESC);
 ### 5.2 启动流程
 
 ```
-1. 采集引擎启动
+1. Web 服务完成依赖初始化后启动采集引擎
 2. 从数据库加载所有 enabled=true AND deleted=false 的设备
 3. 从数据库加载所有 enabled=true AND deleted=false 的采集点，按 device_id 分组
 4. 对每个设备，尝试建立连接：
    a. 连接成功 → 标记为"已连接"，启动该设备下所有采集点的采集任务
    b. 连接失败 → 标记为"断开"，启动重连计时器
-5. 每个采集点按 collect_interval 周期性执行
+5. 调度器按 collect_interval 生成点位任务并投递到有界 worker pool；同一设备的协议操作串行执行
 ```
 
 ### 5.3 采集任务执行流程
 
-```
-每个采集点周期执行：
-1. 检查设备连接状态：
-   - 已连接 → 执行采集
-   - 断开中 → 标记质量戳为 bad，跳过本次采集
-2. 调用协议驱动读取数据：
-   - 成功 → 获取原始值
-   - 失败 → 递增失败计数，标记质量戳为 bad
-3. 数据解析：
-   - 根据 data_type 解析原始字节为对应类型值
-   - 应用 byte_order/word_order（Modbus REAL类型）
-4. 质量戳判定：
-   - 读取成功 + 值在合理范围内 → good
-   - 读取失败 → bad
-   - 读取成功但值为 null/异常 → bad
-5. 更新内存缓存（latest_values）：
-   - key: 采集点ID
-   - value: { value, quality, ts }
-6. 写入TDengine（如果 store_history=true）：
-   - 根据 history_interval 判断是否需要写入
-   - 写入时使用质量戳标记
-7. 发送MQTT消息（如果启用了MQTT）：
-   - 主题：plc/{device_id}/{point_id}/realtime
-   - 载荷：{ ts, value, quality }
+```text
+每个点位到期时：
+1. 调度器生成任务并投递到有界 worker pool；队列满时记录告警，不无限创建 goroutine。
+2. 获取该设备的独立 ProtocolConnection，并进入设备级串行命令队列。
+3. 读取和解析：
+   - 成功且值在有效范围内（或未配置范围）→ value=实际值, quality=good；
+   - 成功但超出 valid_min/valid_max → value=实际值, quality=bad, quality_reason=out_of_range；
+   - 超时/断线/读取失败/解析失败 → value=null, quality=bad，并填写稳定 quality_reason。
+4. 更新内存 latest_values：{value, quality, quality_reason, ts}。
+5. store_history=true 且到达 history_interval 时写入 TDengine。
+6. 首次准备写入历史数据前设置 history_started_at；设置成功后即禁止修改 device_id/data_type。
+7. 如配置 MQTT，由独立发布队列异步发送，MQTT 失败不得阻塞采集任务。
 ```
 
 ### 5.4 质量戳判定规则
 
-| 条件 | 质量戳（API层） | 质量戳（存储层 INT） |
-|------|----------------|---------------------|
-| 协议读取成功，返回有效值 | `good` | `0` |
-| 协议读取成功，但值为 null 或解析异常 | `bad` | `1` |
-| 协议读取失败（超时/无响应/异常） | `bad` | `1` |
-| 设备连接断开 | `bad` | `1` |
-| 设备连接断开后，断线期间所有采集点都标记为 `bad` | `bad` | `1` |
-| 查询时间范围内无对应数据记录 | `none` | 不存在（无记录） |
+| 条件 | value | quality | quality_reason | TDengine quality |
+|---|---:|---|---|---:|
+| 读取、解析成功且在有效范围内 | 实际值 | `good` | null | 0 |
+| 读取成功但超出有效范围 | 实际值 | `bad` | `out_of_range` | 1 |
+| 协议超时 | null | `bad` | `timeout` | 1 |
+| 设备断开 | null | `bad` | `disconnected` | 1 |
+| 读取异常 | null | `bad` | `read_error` | 1 |
+| 解析异常 | null | `bad` | `parse_error` | 1 |
+| 查询目标时间无记录 | null | `none` | null | 不落库 |
 
-> **质量戳转换约定**：TDengine 存储 INT 值（0=good, 1=bad），后端 API 层在返回响应时统一转换为字符串格式。前端始终处理字符串格式的质量戳。`none` 状态仅在查询无匹配记录时由 API 层返回，不会出现在 TDengine 存储中。
+API 始终返回字符串质量戳。`none` 只表示查询没有匹配记录；不得用 `bad` 代替缺失，也不得用 0 或上次值填充失败读取。
 
 ### 5.5 断线重连机制
 
@@ -980,75 +1029,64 @@ CREATE INDEX idx_write_logs_time ON write_logs(created_at DESC);
 | 删除采集点 | 停止该点的采集任务 |
 | 启用/禁用采集点 | 禁用则停止，启用则启动 |
 
-实现方式：采集引擎启动一个配置变更监听协程，定期（每5秒）或通过数据库通知监听配置变更。
+实现方式：Service 在配置事务提交后发布进程内变更事件，采集引擎正常情况下 1 秒内处理；同时每 5 秒按配置版本执行一次全量校对，作为丢事件后的兜底，因此对外保证 5 秒内最终生效。
 
 ### 5.7 TDengine 数据写入
 
 #### 5.7.1 超级表定义
 
 ```sql
--- 采集点数据超级表
 CREATE STABLE IF NOT EXISTS collection_data (
-    ts          TIMESTAMP,        -- 采集时间戳
-    value       DOUBLE,           -- 采集值（所有类型统一转DOUBLE，BOOL转0/1）
-    quality     INT,              -- 质量戳：0=good, 1=bad
-    point_id    VARCHAR(32),      -- 采集点ID（加速查询冗余字段）
-    point_name  VARCHAR(128)      -- 采集点名称（冗余字段，方便查询）
+    ts              TIMESTAMP,
+    value           DOUBLE,           -- 可空；BOOL 使用 0/1
+    quality         INT,              -- 0=good, 1=bad
+    quality_reason  VARCHAR(32),      -- 可空稳定原因代码
+    point_id        VARCHAR(36),
+    point_name      VARCHAR(128)
 ) TAGS (
-    device_id   VARCHAR(32),      -- 设备ID
-    device_name VARCHAR(128),     -- 设备名称
-    data_type   VARCHAR(16)       -- 原始数据类型
+    device_id       VARCHAR(36),
+    device_name     VARCHAR(128),
+    data_type       VARCHAR(16)
 );
 ```
 
+`point_id`、`device_id` 使用 36 位标准 UUID。`point_name`、`device_name` 和 `data_type` 是写入/建表时快照；历史 API 的当前显示名称、单位和生命周期状态以 PostgreSQL 元数据为准。
+
 #### 5.7.2 子表创建策略
 
-每个采集点对应一个子表，子表名使用采集点ID去掉连字符后的字符串：
+每个采集点对应一个子表。子表名由已校验 UUID 的规范化小写形式派生：固定前缀 `p_` 加上去除连字符后的 32 位十六进制字符串，即 `p_<uuid32>`。不得接受或使用请求中直接传入的表名。
 
 ```sql
 -- 假设采集点ID为: a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d
--- 子表名: a1b2c3d4e5f64a7b8c9d0e1f2a3b4c5d
-CREATE TABLE IF NOT EXISTS a1b2c3d4e5f64a7b8c9d0e1f2a3b4c5d 
+-- 子表名: p_a1b2c3d4e5f64a7b8c9d0e1f2a3b4c5d
+CREATE TABLE IF NOT EXISTS p_a1b2c3d4e5f64a7b8c9d0e1f2a3b4c5d
 USING collection_data TAGS (
-    'device-uuid', '一期曝气柜PLC', 'REAL'
+    'd2e3f4a5-b6c7-4d8e-9f01-a2b3c4d5e6f7', '一期曝气柜PLC', 'REAL'
 );
 ```
 
 #### 5.7.3 写入策略
 
-- 写入时使用 `INSERT INTO ... USING ... TAGS` 语法，自动创建子表
-- 批量写入：每1秒或每100条数据攒一批写入，提高写入效率
-- 如果 store_history=false，不写入TDengine
-- 写入频率由 history_interval 控制（例如 history_interval=5，则每5分钟写入一条）
+- 首次准备历史写入前设置 `history_started_at`，然后使用 `INSERT INTO ... USING ... TAGS` 创建/写入子表
+- 批量写入：每1秒或每100条数据一批；服务关闭前尽力刷新
+- `store_history=false` 时停止新增历史记录，但已存在的数据仍可在历史模块中查询
+- 写入频率由 `history_interval` 控制
+- 动态子表名只由已验证 UUID 派生并通过 `^p_[0-9a-f]{32}$` 校验；时间和值参数仍使用参数绑定
 
 ### 5.8 运行时状态查询接口
 
-采集引擎需要对外提供设备连接状态的查询能力，供 API Handler 层在组装设备列表/详情响应时获取。
+采集引擎实现只读 `DeviceRuntimeStatusProvider`，由设备 Service 注入使用；Handler 不直接访问引擎。
 
-```
-采集引擎内部维护：
-  deviceConnections map[string]ConnectionState  // key: device_id
-
-  type ConnectionState struct {
-      Status   string    // "connected" | "disconnected"
-      Since    time.Time // 状态持续起始时间
-  }
-
-对外暴露的查询方法（在采集引擎实例上）：
-  func (m *CollectorManager) GetDeviceStatus(deviceID string) string
-  func (m *CollectorManager) GetDeviceStatusMap() map[string]string
+```go
+type DeviceRuntimeStatusProvider interface {
+    GetDeviceStatus(ctx context.Context, deviceID uuid.UUID) ConnectionStatus
+    GetDeviceStatuses(ctx context.Context, deviceIDs []uuid.UUID) map[uuid.UUID]ConnectionStatus
+}
 ```
 
-状态查询规则：
+状态枚举：`connected | disconnected | disabled`。设备 Service 根据持久化 `enabled/deleted` 与运行时状态统一计算响应：禁用或删除始终为 `disabled`；启用但引擎无状态时为 `disconnected`。
 
-| 条件 | 返回状态 |
-|------|---------|
-| 设备不在映射表中（引擎未初始化该设备） | `disconnected` |
-| 设备在映射表中且连接成功 | `connected` |
-| 设备在映射表中但连接已断开 | `disconnected` |
-| 引擎未启动或不可用 | `disconnected` |
-
-> 采集引擎以单例模式运行在服务端进程中，API Handler 通过依赖注入获取引擎实例的引用，直接调用 `GetDeviceStatusMap()` 查询状态。
+采集引擎和最新值缓存均为进程内组件，通过公开接口注入相应 Service；不得由 Handler 获取单例或读取内部 map。
 
 ---
 
@@ -1056,20 +1094,16 @@ USING collection_data TAGS (
 
 ### 6.1 架构概述
 
-写入引擎负责接收写入请求（来自人工Web操作或AI引擎自动调用），执行写入操作并返回结果。两种写入来源共用同一个执行通道，区别仅在于 source 字段和 operator 字段不同。
+写入引擎负责接收人工写入请求、执行写入操作并返回结果。当前阶段未接入身份认证或自动写入；服务端将每次请求记录为 `source=manual`、`operator=null`，表示发生了未认证的人工写入请求，而非已识别具体操作者。
 
 ```
 写入请求
-    │
-    ├── source=manual（来自Web前端人工操作）
-    └── source=auto（来自AI引擎程序自动调用）
     │
     ▼
 ┌─────────────────────┐
 │  请求校验             │
 │  - 写入点是否存在      │
 │  - write_enabled=true │
-│  - source是否允许      │
 │  - 值类型校验          │
 └─────────┬───────────┘
           │
@@ -1092,10 +1126,9 @@ USING collection_data TAGS (
 ### 6.2 写入安全策略
 
 1. **write_enabled 开关**：写入点必须显式开启 write_enabled=true 才能写入，防止误操作
-2. **写入来源校验**：写入点的 write_source 字段控制该点允许 manual/auto/both 哪种来源
-3. **回读验证**：每次写入后必须回读确认，值一致才算成功
-4. **操作审计**：所有写入操作记录到 write_logs，可追溯
-5. **权限控制**：写入操作需要用户登录权限（由Web后端统一管理）
+2. **回读验证**：BOOL/INT 严格相等；REAL 满足 `abs(actual-target) <= readback_tolerance` 才算成功
+3. **操作记录**：所有写入操作记录到 write_logs，包含日志 ID、时间、点位、目标值、回读值、结果、失败原因和原因；当前阶段不记录具体操作者
+4. **访问边界**：当前阶段未实施身份认证，写入 API 仅应部署在受信任的内部网络；接入身份认证后再补充操作者归属与权限控制
 
 ---
 
@@ -1103,96 +1136,109 @@ USING collection_data TAGS (
 
 ### 7.1 接口定义
 
-所有协议驱动必须实现以下接口：
+协议注册表保存无状态工厂；每个设备创建独立连接实例。
 
 ```go
-// ProtocolDriver 协议驱动接口
-type ProtocolDriver interface {
-    // 协议类型标识，如 "S7", "MODBUS_TCP"
+type DataType string
+
+const (
+    DataTypeBool DataType = "BOOL"
+    DataTypeInt  DataType = "INT"
+    DataTypeReal DataType = "REAL"
+)
+
+type DeviceConnectionConfig struct {
+    DeviceID       uuid.UUID
+    Host           string
+    Port           int
+    ConnectTimeout time.Duration
+    ProtocolConfig map[string]any
+}
+
+type ProtocolDriverFactory interface {
     ProtocolType() string
-    
-    // 创建连接
-    // config: 设备配置中的 protocol_config（JSONB解析后的map）
-    // host: 设备IP
-    // port: 设备端口
-    // timeout: 连接超时（秒）
-    Connect(config map[string]interface{}, host string, port int, timeout int) error
-    
-    // 断开连接
-    Disconnect() error
-    
-    // 读取数据
-    // address: 采集点地址字符串（如 "DB2.10", "M4.0", "40001"）
-    // dataType: 数据类型（BOOL/INT/REAL）
-    // 返回: 读取到的值（统一使用float64返回，BOOL返回0或1），错误
-    Read(address string, dataType string) (float64, error)
-    
-    // 写入数据
-    // address: 写入点地址字符串
-    // dataType: 数据类型
-    // value: 要写入的值（float64，BOOL类型时0=false，1=true）
-    // 返回: 错误
-    Write(address string, dataType string, value float64) error
-    
-    // 校验地址格式是否合法
-    ValidateAddress(address string, dataType string) error
-    
-    // 获取协议配置的JSON Schema（用于前端动态渲染配置表单）
-    ConfigSchema() map[string]interface{}
+    ValidateConfig(config map[string]any) error
+    ValidateAddress(address string, dataType DataType, writable bool) error
+    ConfigSchema() map[string]any
+    NewConnection(ctx context.Context, cfg DeviceConnectionConfig) (ProtocolConnection, error)
+}
+
+type ProtocolConnection interface {
+    Read(ctx context.Context, address string, dataType DataType) (float64, error)
+    Write(ctx context.Context, address string, dataType DataType, value float64) error
+    Close() error
 }
 ```
+
+约束：
+
+- Factory 必须无连接状态、可并发调用。
+- 每个设备持有一个独立 `ProtocolConnection`。
+- Connection 默认不要求并发安全；ConnectionManager 必须按设备串行调度 Read/Write。
+- 所有调用接收 `context.Context`，超时和取消由上层控制。
+- `Close` 必须幂等。
 
 ### 7.2 注册机制
 
 ```go
-// 全局协议驱动注册表
-var protocolDrivers = make(map[string]ProtocolDriver)
-
-// 注册协议驱动
-func RegisterProtocol(driver ProtocolDriver) {
-    protocolDrivers[driver.ProtocolType()] = driver
+type ProtocolRegistry struct {
+    mu        sync.RWMutex
+    factories map[string]ProtocolDriverFactory
 }
 
-// 获取协议驱动
-func GetProtocol(protocolType string) (ProtocolDriver, error) {
-    driver, ok := protocolDrivers[protocolType]
-    if !ok {
-        return nil, fmt.Errorf("不支持的协议类型: %s", protocolType)
+func (r *ProtocolRegistry) Register(factory ProtocolDriverFactory) error {
+    protocolType := factory.ProtocolType()
+    r.mu.Lock()
+    defer r.mu.Unlock()
+    if _, exists := r.factories[protocolType]; exists {
+        return fmt.Errorf("协议已注册: %s", protocolType)
     }
-    return driver, nil
+    r.factories[protocolType] = factory
+    return nil
+}
+
+func (r *ProtocolRegistry) Get(protocolType string) (ProtocolDriverFactory, error) {
+    r.mu.RLock()
+    defer r.mu.RUnlock()
+    factory, ok := r.factories[protocolType]
+    if !ok {
+        return nil, ErrUnsupportedProtocol
+    }
+    return factory, nil
 }
 ```
 
-### 7.3 扩展新协议的步骤
+注册错误必须在应用启动阶段暴露并终止启动，不使用隐藏失败的包级可变全局变量。
 
-1. 创建新的协议驱动文件，实现 `ProtocolDriver` 接口
-2. 在 `init()` 函数中调用 `RegisterProtocol()` 注册
-3. 在 `protocol_config` 中定义该协议特有的配置参数
-4. 实现 `ConfigSchema()` 返回配置参数的JSON Schema，供前端动态渲染配置表单
+### 7.3 扩展新协议
 
-### 7.4 目前支持的协议驱动
+1. 实现 `ProtocolDriverFactory` 和设备级 `ProtocolConnection`；
+2. 为配置、地址、读写、超时、取消和并发隔离编写测试；
+3. 在应用装配阶段显式注册；
+4. 前端通过 `ConfigSchema()` 渲染协议配置表单；
+5. 更新协议列表和配置导入校验。
 
-#### 7.4.1 S7 协议驱动
+### 7.4 当前协议
+
+#### 7.4.1 S7
 
 | 属性 | 说明 |
-|------|------|
+|---|---|
 | ProtocolType | `S7` |
 | 默认端口 | 102 |
-| 依赖库 | `github.com/robinson/gos7` 或等效实现 |
-| 连接方式 | 基于ISO TCP（RFC 1006） |
-| 地址解析 | 见 [3.1.2 S7协议地址格式](#312-各协议的地址格式) |
-| ConfigSchema | `{ "rack": { "type": "integer", "default": 0 }, "slot": { "type": "integer", "default": 1 } }` |
+| 连接粒度 | 每设备一个连接实例 |
+| 地址解析 | 见 3.1.2 |
+| 配置 | `rack`、`slot` |
 
-#### 7.4.2 Modbus TCP 协议驱动
+#### 7.4.2 Modbus TCP
 
 | 属性 | 说明 |
-|------|------|
+|---|---|
 | ProtocolType | `MODBUS_TCP` |
 | 默认端口 | 502 |
-| 依赖库 | `github.com/goburrow/modbus` 或等效实现 |
-| 连接方式 | Modbus TCP直接连接 |
-| 地址解析 | 见 [3.1.2 Modbus TCP协议地址格式](#312-各协议的地址格式) |
-| ConfigSchema | `{ "unit_id": { "type": "integer", "default": 1, "min": 1, "max": 247 }, "byte_order": { "type": "string", "enum": ["ABCD", "BADC", "CDAB", "DCBA"], "default": "ABCD" }, "word_order": { "type": "string", "enum": ["AB", "BA"], "default": "AB" } }` |
+| 连接粒度 | 每设备一个连接实例 |
+| 地址解析 | 见 3.1.2 |
+| 配置 | `unit_id`、`float32_order`，其中 `float32_order ∈ {ABCD,BADC,CDAB,DCBA}` |
 
 ---
 
@@ -1235,12 +1281,10 @@ func GetProtocol(protocolType string) (ProtocolDriver, error) {
 
 ### A.4 子页面：数据写入
 
-- 写入点列表表格（名称 | 分组 | 所属设备 | 地址 | 数据类型 | 允许写入 | 写入来源 | 操作）
-- 新增/编辑写入点弹窗（写入来源下拉选项：仅人工/仅程序自动/两者均可）
-- 执行写入操作弹窗：区分人工写入和程序自动写入
-  - 人工写入：输入值、选择操作人、原因，点击确认后执行并显示结果
-  - 程序自动写入：显示调用方标识（如 AI 模型名称）
-- 写入操作日志查看（可筛选 source=manual 或 source=auto）
+- 写入点列表表格（名称 | 分组 | 所属设备 | 地址 | 数据类型 | 单位 | 回读容差 | 允许写入 | 操作）
+- 新增/编辑写入点弹窗（配置是否允许写入）
+- 执行写入操作弹窗：输入值和可选原因，点击确认后执行并显示结果
+- 写入操作日志查看（展示未认证人工写入的时间、点位、值、结果和原因）
 - 导入/导出CSV按钮
 
 ---
@@ -1255,15 +1299,17 @@ func GetProtocol(protocolType string) (ProtocolDriver, error) {
 | R004 | 逻辑删除级联 | 删除设备时，该设备下所有采集点和写入点也逻辑删除 |
 | R005 | 采集地址格式校验 | 根据设备协议类型校验地址格式，创建设备时即确定协议 |
 | R006 | 采集周期最小1秒 | 不可低于1秒 |
-| R007 | 历史存储间隔最小1分钟 | 当store_history=true时有效 |
-| R008 | 写入来源校验 | 写入点的 write_source 控制允许 manual/auto/both |
-| R009 | 写入回读验证 | 每次写入后必须回读确认，不一致则重试1次 |
+| R007 | 历史存储间隔范围 | 1~1440 分钟；当store_history=true时必填 |
+| R008 | 人工写入记录 | 服务端固定记录 source=manual、operator=null；当前阶段不支持自动写入 |
+| R009 | 写入回读验证 | BOOL/INT严格相等；REAL按readback_tolerance判断，不一致重试1次 |
 | R010 | 写入点地址类型限制 | 必须使用可写地址类型 |
-| R011 | 质量戳自动判定 | 连接断开/读取失败/解析异常 → bad，正常 → good |
+| R011 | 质量戳自动判定 | 失败时value=null且bad；越界时保留value并标记bad；无匹配记录为none |
 | R012 | 断线无限重连 | 持续按配置间隔重连，直到成功或设备被禁用 |
-| R013 | 配置变更动态生效 | 修改设备/采集点配置后，采集引擎自动更新，无需重启 |
+| R013 | 配置变更动态生效 | 事务后事件正常1秒内生效，5秒全量校对保证最终一致 |
+| R014 | 历史语义不可变 | history_started_at非空后不可修改device_id或data_type |
+| R015 | 协议连接隔离 | 注册Factory，每个设备独立Connection，同设备读写串行 |
 
 ---
 
-> 本文档版本：v1.1
-> 最后更新：2026-07-09
+> 本文档版本：v1.2
+> 最后更新：2026-07-11
