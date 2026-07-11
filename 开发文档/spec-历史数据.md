@@ -221,7 +221,7 @@ ALTER DATABASE water_plant KEEP 730;
 
 #### 5.2.1 GET /api/v1/history/tree — 获取历史点位树
 
-无需参数，从 PostgreSQL 查询所有符合条件的历史点位，按设备→分组→点位构建树。
+无需参数，从 PostgreSQL 查询所有符合条件的历史点位，按分组→点位构建树。
 
 Response (200)：
 
