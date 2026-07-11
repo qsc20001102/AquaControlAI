@@ -664,15 +664,15 @@ RETURNING id;
 POSTGRES_HOST=101.35.54.96
 POSTGRES_PORT=5432
 POSTGRES_USER=qsc20001102
-POSTGRES_PASSWORD=<通过密钥管理服务或本地未提交的 .env 注入>
-POSTGRES_DB=<部署时指定的数据库名>
-POSTGRES_SSLMODE=<部署时指定；生产环境使用 verify-full>
+POSTGRES_PASSWORD=qsc102341
+POSTGRES_DB=aquacontrolai
+
 
 TDENGINE_HOST=101.35.54.96
 TDENGINE_PORT=6041
 TDENGINE_USER=root
-TDENGINE_PASSWORD=<通过密钥管理服务或本地未提交的 .env 注入>
-TDENGINE_DB=<部署时指定的数据库名>
+TDENGINE_PASSWORD=taosdata
+TDENGINE_DB=aquacontrolai
 ```
 
 - **PostgreSQL DSN**：按 `postgres://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}?sslmode={POSTGRES_SSLMODE}` 组装。Go 后端使用连接池，并在应用启动时通过带超时的 `PingContext` 校验连接；不得记录完整 DSN 或密码。
