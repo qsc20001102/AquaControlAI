@@ -70,8 +70,7 @@ CREATE STABLE IF NOT EXISTS collection_data (
 ) TAGS (
     device_id   VARCHAR(32),
     device_name VARCHAR(128),
-    data_type   VARCHAR(16),
-    unit        VARCHAR(32)
+    data_type   VARCHAR(16)
 );
 ```
 
@@ -91,8 +90,7 @@ CREATE STABLE IF NOT EXISTS computed_data (
     point_name  VARCHAR(128),
     source      VARCHAR(32)       -- 数据来源: 'ai_model', 'manual_input', 'external' 等
 ) TAGS (
-    category    VARCHAR(32),      -- 类别，如 'aeration', 'dosing', 'prediction'
-    unit        VARCHAR(32)
+    category    VARCHAR(32)       -- 类别，如 'aeration', 'dosing', 'prediction'
 );
 ```
 
@@ -150,7 +148,6 @@ CREATE STABLE IF NOT EXISTS computed_data (
     "name": "曝气池DO_01",
     "type": "collection",        // 或 'computed'（预留）
     "data_type": "REAL",
-    "unit": "mg/L",
     "device_id": "device-uuid",
     "device_name": "一期曝气柜PLC",
     "group_name": "曝气池",
@@ -189,13 +186,13 @@ CREATE STABLE IF NOT EXISTS computed_data (
 
 ```sql
 -- 创建数据库时指定保留天数
-CREATE DATABASE IF NOT EXISTS water_plant 
+CREATE DATABASE IF NOT EXISTS aquacontrolai 
   KEEP 365                     -- 数据保留天数（对应配置值）
   DAYS 10                      -- 每10天一个文件
   BLOCKS 100;
 
 -- 修改保留天数（当用户在系统配置中修改时执行）
-ALTER DATABASE water_plant KEEP 730;
+ALTER DATABASE aquacontrolai KEEP 730;
 ```
 
 ### 4.3 注意
@@ -238,7 +235,6 @@ Response (200)：
                     "name": "曝气池DO_01",
                     "type": "collection",
                     "data_type": "REAL",
-                    "unit": "mg/L",
                     "device_id": "device-uuid-1",
                     "device_name": "一期曝气柜PLC",
                     "latest_value": 2.35,
@@ -250,7 +246,6 @@ Response (200)：
                     "name": "曝气池温度",
                     "type": "collection",
                     "data_type": "REAL",
-                    "unit": "℃",
                     "device_id": "device-uuid-1",
                     "device_name": "一期曝气柜PLC",
                     "latest_value": 25.1,
@@ -314,7 +309,6 @@ Response (200)：
         {
             "point_id": "point-uuid-1",
             "point_name": "曝气池DO_01",
-            "unit": "mg/L",
             "data_type": "REAL",
             "data": [
                 { "ts": "2026-07-09T00:00:01+08:00", "value": 2.35, "quality": "good" },
@@ -327,7 +321,6 @@ Response (200)：
         {
             "point_id": "point-uuid-2",
             "point_name": "曝气池温度",
-            "unit": "℃",
             "data_type": "REAL",
             "data": [
                 { "ts": "2026-07-09T00:00:01+08:00", "value": 25.1, "quality": "good" },
@@ -399,7 +392,6 @@ Response (200)：
         {
             "point_id": "point-uuid-1",
             "point_name": "曝气池DO_01",
-            "unit": "mg/L",
             "data": [
                 { "value": 2.35, "quality": "good" },
                 { "value": 2.40, "quality": "good" },
@@ -413,7 +405,6 @@ Response (200)：
         {
             "point_id": "point-uuid-2",
             "point_name": "曝气池温度",
-            "unit": "℃",
             "data": [
                 { "value": 25.1, "quality": "good" },
                 { "value": 25.0, "quality": "good" },
@@ -446,7 +437,7 @@ Response：CSV文件（Content-Type: text/csv; charset=utf-8-sig）
 CSV格式：
 
 ```csv
-时间,曝气池DO_01(mg/L),曝气池DO_01_质量,曝气池温度(℃),曝气池温度_质量
+时间,曝气池DO_01,曝气池DO_01_质量,曝气池温度,曝气池温度_质量
 2026-07-09 00:00:00,2.35,good,25.1,good
 2026-07-09 00:10:00,2.40,good,25.0,good
 2026-07-09 00:20:00,—,—,25.3,good
@@ -513,7 +504,7 @@ CSV格式：
 
 **场景举例**：
 
-同时展示两条曲线，一条 DO 值在 2.0~3.0 mg/L，一条温度在 20~30℃。如果Y轴从0均匀到30，DO曲线会被压缩成一条几乎水平的直线，完全看不出变化。
+同时展示两条曲线，一条 DO 值在 2.0~3.0，一条温度在 20~30。如果Y轴从0均匀到30，DO曲线会被压缩成一条几乎水平的直线，完全看不出变化。
 
 **实现方式 — 分段映射法**：
 
@@ -573,7 +564,7 @@ p = sum( previous_segment_heights ) + (v - segment_start) / (segment_end - segme
 | 数值标签 | 显示原始数值，不显示映射后的坐标值 |
 | 刻度位置 | 刻度线在Y轴上的物理位置由映射函数决定，不是均匀分布 |
 | 刻度数量 | 自动控制，保持5~10个刻度标签，避免过密 |
-| 单位标注 | Y轴标题显示 `数值 (单位)`，如 `mg/L` |
+| 标题标注 | Y轴标题显示 `数值` |
 | 分段视觉提示 | 在Y轴背景上用浅色横条标记不同分段区域，帮助用户识别分段边界 |
 
 #### 6.3.3 折线规则
@@ -632,7 +623,7 @@ p = sum( previous_segment_heights ) + (v - segment_start) / (segment_end - segme
 │ (复选框)   │  间隔: [10分钟] ▼                     │
 │            │                                      │
 │  ☑ 曝气池   │  ┌──────────────────────────────────┐  │
-│    ☑ DO    │  │ 时间         │ DO(mg/L)│ 温度(℃)│  │
+│    ☑ DO    │  │ 时间         │ DO      │ 温度    │  │
 │    ☐ 温度   │  │──────────────┼─────────┼────────│  │
 │  ☐ 加药间   │  │ 00:00:00     │ 2.35    │ 25.1   │  │
 │            │  │ 00:10:00     │ 2.40    │ 25.0   │  │

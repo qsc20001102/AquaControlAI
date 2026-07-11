@@ -662,6 +662,52 @@ CREATE INDEX idx_write_points_group ON write_points(group_name) WHERE deleted = 
 | POST | /api/v1/write-points/export | 导出CSV |
 | POST | /api/v1/write-points/import | 从CSV导入 |
 | POST | /api/v1/write-points/{id}/write | 执行写入操作（人工/程序自动均使用此接口） |
+| GET | /api/v1/write-logs | 查询写入操作日志 |
+
+**GET /api/v1/write-logs** — 查询写入操作日志
+
+Query parameters：
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| page | int | 否 | 默认1 |
+| page_size | int | 否 | 默认20，最大100 |
+| point_id | string | 否 | 按写入点筛选 |
+| device_id | string | 否 | 按设备筛选 |
+| source | string | 否 | 筛选 manual/auto |
+| result | string | 否 | 筛选 success/failed |
+| start_time | string | 否 | 开始时间 |
+| end_time | string | 否 | 结束时间 |
+| keyword | string | 否 | 搜索 operator 或 point_name |
+
+Response (200)：
+
+```json
+{
+    "total": 500,
+    "page": 1,
+    "page_size": 20,
+    "items": [
+        {
+            "id": "uuid",
+            "point_id": "uuid",
+            "point_name": "加药泵频率",
+            "device_id": "uuid",
+            "device_name": "一期加药间PLC",
+            "address": "DB2.10",
+            "data_type": "REAL",
+            "source": "manual",
+            "target_value": "20.5",
+            "readback_value": "20.5",
+            "result": "success",
+            "error_message": null,
+            "operator": "张三",
+            "reason": "AI推荐加药量调整",
+            "created_at": "2026-07-09T10:00:00+08:00"
+        }
+    ]
+}
+```
 
 #### 4.2.2 写入接口详细定义
 
@@ -903,8 +949,7 @@ CREATE STABLE IF NOT EXISTS collection_data (
 ) TAGS (
     device_id   VARCHAR(32),      -- 设备ID
     device_name VARCHAR(128),     -- 设备名称
-    data_type   VARCHAR(16),      -- 原始数据类型
-    unit        VARCHAR(32)       -- 单位（可选，由采集点配置扩展）
+    data_type   VARCHAR(16)       -- 原始数据类型
 );
 ```
 
@@ -917,7 +962,7 @@ CREATE STABLE IF NOT EXISTS collection_data (
 -- 子表名: a1b2c3d4e5f64a7b8c9d0e1f2a3b4c5d
 CREATE TABLE IF NOT EXISTS a1b2c3d4e5f64a7b8c9d0e1f2a3b4c5d 
 USING collection_data TAGS (
-    'device-uuid', '一期曝气柜PLC', 'REAL', 'mg/L'
+    'device-uuid', '一期曝气柜PLC', 'REAL'
 );
 ```
 
