@@ -151,9 +151,11 @@ CREATE STABLE IF NOT EXISTS computed_data (
     "device_id": "device-uuid",
     "device_name": "一期曝气柜PLC",
     "group_name": "曝气池",
-    "latest_value": 2.35,
-    "latest_quality": "good",
-    "latest_ts": "2026-07-09T10:00:01+08:00"
+    "latest_value": {
+        "value": 2.35,
+        "quality": "good",
+        "ts": "2026-07-09T10:00:01+08:00"
+    }
 }
 ```
 
@@ -224,50 +226,58 @@ Response (200)：
 
 ```json
 {
-    "tree": [
-        {
-            "id": "group-aeration",
-            "name": "曝气池",
-            "type": "group",
-            "children": [
-                {
-                    "id": "point-uuid-1",
-                    "name": "曝气池DO_01",
-                    "type": "collection",
-                    "data_type": "REAL",
-                    "device_id": "device-uuid-1",
-                    "device_name": "一期曝气柜PLC",
-                    "latest_value": 2.35,
-                    "latest_quality": "good",
-                    "latest_ts": "2026-07-09T10:00:01+08:00"
-                },
-                {
-                    "id": "point-uuid-2",
-                    "name": "曝气池温度",
-                    "type": "collection",
-                    "data_type": "REAL",
-                    "device_id": "device-uuid-1",
-                    "device_name": "一期曝气柜PLC",
-                    "latest_value": 25.1,
-                    "latest_quality": "good",
-                    "latest_ts": "2026-07-09T10:00:01+08:00"
-                }
-            ]
-        },
-        {
-            "id": "internal-data",
-            "name": "内部数据",
-            "type": "reserved",
-            "children": [
-                {
-                    "id": "placeholder",
-                    "name": "暂无数据",
-                    "type": "placeholder",
-                    "disabled": true
-                }
-            ]
-        }
-    ]
+    "code": 0,
+    "message": "success",
+    "data": {
+        "tree": [
+            {
+                "id": "group-aeration",
+                "name": "曝气池",
+                "type": "group",
+                "children": [
+                    {
+                        "id": "point-uuid-1",
+                        "name": "曝气池DO_01",
+                        "type": "collection",
+                        "data_type": "REAL",
+                        "device_id": "device-uuid-1",
+                        "device_name": "一期曝气柜PLC",
+                        "latest_value": {
+                            "value": 2.35,
+                            "quality": "good",
+                            "ts": "2026-07-09T10:00:01+08:00"
+                        }
+                    },
+                    {
+                        "id": "point-uuid-2",
+                        "name": "曝气池温度",
+                        "type": "collection",
+                        "data_type": "REAL",
+                        "device_id": "device-uuid-1",
+                        "device_name": "一期曝气柜PLC",
+                        "latest_value": {
+                            "value": 25.1,
+                            "quality": "good",
+                            "ts": "2026-07-09T10:00:01+08:00"
+                        }
+                    }
+                ]
+            },
+            {
+                "id": "internal-data",
+                "name": "内部数据",
+                "type": "reserved",
+                "children": [
+                    {
+                        "id": "placeholder",
+                        "name": "暂无数据",
+                        "type": "placeholder",
+                        "disabled": true
+                    }
+                ]
+            }
+        ]
+    }
 }
 ```
 
@@ -305,30 +315,34 @@ Response (200)：
 
 ```json
 {
-    "series": [
-        {
-            "point_id": "point-uuid-1",
-            "point_name": "曝气池DO_01",
-            "data_type": "REAL",
-            "data": [
-                { "ts": "2026-07-09T00:00:01+08:00", "value": 2.35, "quality": "good" },
-                { "ts": "2026-07-09T00:00:02+08:00", "value": 2.36, "quality": "good" },
-                { "ts": "2026-07-09T00:00:05+08:00", "value": 2.38, "quality": "good" },
-                { "ts": "2026-07-09T00:00:08+08:00", "value": 2.30, "quality": "bad" },
-                { "ts": "2026-07-09T00:00:10+08:00", "value": 2.40, "quality": "good" }
-            ]
-        },
-        {
-            "point_id": "point-uuid-2",
-            "point_name": "曝气池温度",
-            "data_type": "REAL",
-            "data": [
-                { "ts": "2026-07-09T00:00:01+08:00", "value": 25.1, "quality": "good" },
-                { "ts": "2026-07-09T00:00:05+08:00", "value": 25.2, "quality": "good" },
-                { "ts": "2026-07-09T00:00:10+08:00", "value": 25.0, "quality": "good" }
-            ]
-        }
-    ]
+    "code": 0,
+    "message": "success",
+    "data": {
+        "series": [
+            {
+                "point_id": "point-uuid-1",
+                "point_name": "曝气池DO_01",
+                "data_type": "REAL",
+                "data": [
+                    { "ts": "2026-07-09T00:00:01+08:00", "value": 2.35, "quality": "good" },
+                    { "ts": "2026-07-09T00:00:02+08:00", "value": 2.36, "quality": "good" },
+                    { "ts": "2026-07-09T00:00:05+08:00", "value": 2.38, "quality": "good" },
+                    { "ts": "2026-07-09T00:00:08+08:00", "value": 2.30, "quality": "bad" },
+                    { "ts": "2026-07-09T00:00:10+08:00", "value": 2.40, "quality": "good" }
+                ]
+            },
+            {
+                "point_id": "point-uuid-2",
+                "point_name": "曝气池温度",
+                "data_type": "REAL",
+                "data": [
+                    { "ts": "2026-07-09T00:00:01+08:00", "value": 25.1, "quality": "good" },
+                    { "ts": "2026-07-09T00:00:05+08:00", "value": 25.2, "quality": "good" },
+                    { "ts": "2026-07-09T00:00:10+08:00", "value": 25.0, "quality": "good" }
+                ]
+            }
+        ]
+    }
 }
 ```
 
@@ -351,6 +365,8 @@ Request body：
 | start_time | string | 是 | 开始时间 |
 | end_time | string | 是 | 结束时间 |
 | interval_minutes | int | 是 | 间隔分钟数，范围1~1440，必须能被60整除（建议限制为1, 2, 5, 10, 15, 20, 30, 60） |
+
+> **注意**：`interval_minutes` 是表格展示的对齐间隔，与采集点配置的 `history_interval`（存储间隔，见数据管理模块 §3.1.1）相互独立。如果 `interval_minutes` 小于选中点位中最大的 `history_interval`，大部分目标时间点将因无匹配数据而显示为 `—`。建议前端在表格模式下默认将 `interval_minutes` 的最小可选值限制为不小于所有已勾选点位中最大的 `history_interval`，或至少在用户选择过小间隔时给出提示。
 
 **后端逻辑（重点 — 最近邻匹配）：**
 
@@ -379,43 +395,47 @@ Response (200)：
 
 ```json
 {
-    "time_column": [
-        "2026-07-09T00:00:00+08:00",
-        "2026-07-09T00:10:00+08:00",
-        "2026-07-09T00:20:00+08:00",
-        "2026-07-09T00:30:00+08:00",
-        "2026-07-09T00:40:00+08:00",
-        "2026-07-09T00:50:00+08:00",
-        "2026-07-09T01:00:00+08:00"
-    ],
-    "columns": [
-        {
-            "point_id": "point-uuid-1",
-            "point_name": "曝气池DO_01",
-            "data": [
-                { "value": 2.35, "quality": "good" },
-                { "value": 2.40, "quality": "good" },
-                null,
-                { "value": 2.38, "quality": "good" },
-                { "value": 2.42, "quality": "good" },
-                null,
-                { "value": 2.36, "quality": "good" }
-            ]
-        },
-        {
-            "point_id": "point-uuid-2",
-            "point_name": "曝气池温度",
-            "data": [
-                { "value": 25.1, "quality": "good" },
-                { "value": 25.0, "quality": "good" },
-                { "value": 25.3, "quality": "good" },
-                null,
-                { "value": 25.1, "quality": "good" },
-                { "value": 25.2, "quality": "good" },
-                { "value": 25.0, "quality": "good" }
-            ]
-        }
-    ]
+    "code": 0,
+    "message": "success",
+    "data": {
+        "time_column": [
+            "2026-07-09T00:00:00+08:00",
+            "2026-07-09T00:10:00+08:00",
+            "2026-07-09T00:20:00+08:00",
+            "2026-07-09T00:30:00+08:00",
+            "2026-07-09T00:40:00+08:00",
+            "2026-07-09T00:50:00+08:00",
+            "2026-07-09T01:00:00+08:00"
+        ],
+        "columns": [
+            {
+                "point_id": "point-uuid-1",
+                "point_name": "曝气池DO_01",
+                "data": [
+                    { "value": 2.35, "quality": "good" },
+                    { "value": 2.40, "quality": "good" },
+                    null,
+                    { "value": 2.38, "quality": "good" },
+                    { "value": 2.42, "quality": "good" },
+                    null,
+                    { "value": 2.36, "quality": "good" }
+                ]
+            },
+            {
+                "point_id": "point-uuid-2",
+                "point_name": "曝气池温度",
+                "data": [
+                    { "value": 25.1, "quality": "good" },
+                    { "value": 25.0, "quality": "good" },
+                    { "value": 25.3, "quality": "good" },
+                    null,
+                    { "value": 25.1, "quality": "good" },
+                    { "value": 25.2, "quality": "good" },
+                    { "value": 25.0, "quality": "good" }
+                ]
+            }
+        ]
+    }
 }
 ```
 
@@ -737,6 +757,7 @@ p = sum( previous_segment_heights ) + (v - segment_start) / (segment_end - segme
 | H008 | 数据缺失 | 曲线：断线；表格：`—` |
 | H009 | 模式切换 | 保持点位勾选状态和时间范围不变 |
 | H010 | CSV导出 | 使用UTF-8 with BOM编码，与表格显示内容一致 |
+| H011 | 查询间隔建议 | 表格查询的 `interval_minutes` 建议不小于选中点位的 `history_interval`，否则可能大量无匹配数据 |
 
 ---
 

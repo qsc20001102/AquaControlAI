@@ -202,20 +202,24 @@ Response (201)：
 
 ```json
 {
-    "id": "uuid-string",
-    "name": "一期曝气柜PLC",
-    "protocol_type": "S7",
-    "enabled": true,
-    "host": "192.168.1.100",
-    "port": 102,
-    "connect_timeout": 5,
-    "reconnect_interval": 10,
-    "protocol_config": {
-        "rack": 0,
-        "slot": 1
-    },
-    "created_at": "2026-07-09T10:00:00+08:00",
-    "updated_at": "2026-07-09T10:00:00+08:00"
+    "code": 0,
+    "message": "success",
+    "data": {
+        "id": "uuid-string",
+        "name": "一期曝气柜PLC",
+        "protocol_type": "S7",
+        "enabled": true,
+        "host": "192.168.1.100",
+        "port": 102,
+        "connect_timeout": 5,
+        "reconnect_interval": 10,
+        "protocol_config": {
+            "rack": 0,
+            "slot": 1
+        },
+        "created_at": "2026-07-09T10:00:00+08:00",
+        "updated_at": "2026-07-09T10:00:00+08:00"
+    }
 }
 ```
 
@@ -292,25 +296,29 @@ Response (200)：
 
 ```json
 {
-    "total": 50,
-    "page": 1,
-    "page_size": 20,
-    "items": [
-        {
-            "id": "uuid",
-            "name": "一期曝气柜PLC",
-            "protocol_type": "S7",
-            "enabled": true,
-            "host": "192.168.1.100",
-            "port": 102,
-            "connect_timeout": 5,
-            "reconnect_interval": 10,
-            "protocol_config": { "rack": 0, "slot": 1 },
-            "connection_status": "connected",
-            "created_at": "...",
-            "updated_at": "..."
-        }
-    ]
+    "code": 0,
+    "message": "success",
+    "data": {
+        "total": 50,
+        "page": 1,
+        "page_size": 20,
+        "items": [
+            {
+                "id": "uuid",
+                "name": "一期曝气柜PLC",
+                "protocol_type": "S7",
+                "enabled": true,
+                "host": "192.168.1.100",
+                "port": 102,
+                "connect_timeout": 5,
+                "reconnect_interval": 10,
+                "protocol_config": { "rack": 0, "slot": 1 },
+                "connection_status": "connected",
+                "created_at": "...",
+                "updated_at": "..."
+            }
+        ]
+    }
 }
 ```
 
@@ -520,32 +528,36 @@ Response (200)：
 
 ```json
 {
-    "total": 200,
-    "page": 1,
-    "page_size": 20,
-    "items": [
-        {
-            "id": "uuid",
-            "name": "曝气池DO_01",
-            "group_name": "曝气池",
-            "device_id": "uuid",
-            "device_name": "一期曝气柜PLC",
-            "protocol_type": "S7",
-            "address": "DB2.10",
-            "data_type": "REAL",
-            "collect_interval": 1,
-            "store_history": true,
-            "history_interval": 1,
-            "enabled": true,
-            "latest_value": {
-                "value": 2.35,
-                "quality": "good",
-                "ts": "2026-07-09T10:00:01+08:00"
-            },
-            "created_at": "...",
-            "updated_at": "..."
-        }
-    ]
+    "code": 0,
+    "message": "success",
+    "data": {
+        "total": 200,
+        "page": 1,
+        "page_size": 20,
+        "items": [
+            {
+                "id": "uuid",
+                "name": "曝气池DO_01",
+                "group_name": "曝气池",
+                "device_id": "uuid",
+                "device_name": "一期曝气柜PLC",
+                "protocol_type": "S7",
+                "address": "DB2.10",
+                "data_type": "REAL",
+                "collect_interval": 1,
+                "store_history": true,
+                "history_interval": 1,
+                "enabled": true,
+                "latest_value": {
+                    "value": 2.35,
+                    "quality": "good",
+                    "ts": "2026-07-09T10:00:01+08:00"
+                },
+                "created_at": "...",
+                "updated_at": "..."
+            }
+        ]
+    }
 }
 ```
 
@@ -555,20 +567,24 @@ Response (200)：
 
 ```json
 {
-    "groups": [
-        {
-            "name": "default",
-            "count": 10
-        },
-        {
-            "name": "曝气池",
-            "count": 25
-        },
-        {
-            "name": "加药间",
-            "count": 15
-        }
-    ]
+    "code": 0,
+    "message": "success",
+    "data": {
+        "groups": [
+            {
+                "name": "default",
+                "count": 10
+            },
+            {
+                "name": "曝气池",
+                "count": 25
+            },
+            {
+                "name": "加药间",
+                "count": 15
+            }
+        ]
+    }
 }
 ```
 
@@ -684,28 +700,32 @@ Response (200)：
 
 ```json
 {
-    "total": 500,
-    "page": 1,
-    "page_size": 20,
-    "items": [
-        {
-            "id": "uuid",
-            "point_id": "uuid",
-            "point_name": "加药泵频率",
-            "device_id": "uuid",
-            "device_name": "一期加药间PLC",
-            "address": "DB2.10",
-            "data_type": "REAL",
-            "source": "manual",
-            "target_value": "20.5",
-            "readback_value": "20.5",
-            "result": "success",
-            "error_message": null,
-            "operator": "张三",
-            "reason": "AI推荐加药量调整",
-            "created_at": "2026-07-09T10:00:00+08:00"
-        }
-    ]
+    "code": 0,
+    "message": "success",
+    "data": {
+        "total": 500,
+        "page": 1,
+        "page_size": 20,
+        "items": [
+            {
+                "id": "uuid",
+                "point_id": "uuid",
+                "point_name": "加药泵频率",
+                "device_id": "uuid",
+                "device_name": "一期加药间PLC",
+                "address": "DB2.10",
+                "data_type": "REAL",
+                "source": "manual",
+                "target_value": "20.5",
+                "readback_value": "20.5",
+                "result": "success",
+                "error_message": null,
+                "operator": "张三",
+                "reason": "AI推荐加药量调整",
+                "created_at": "2026-07-09T10:00:00+08:00"
+            }
+        ]
+    }
 }
 ```
 
@@ -769,12 +789,16 @@ Response (200)：
 
 ```json
 {
-    "id": "uuid",
-    "point_name": "加药泵频率",
-    "value": 20.5,
-    "result": "success",
-    "readback_value": 20.5,
-    "ts": "2026-07-09T10:00:00+08:00"
+    "code": 0,
+    "message": "success",
+    "data": {
+        "id": "uuid",
+        "point_name": "加药泵频率",
+        "value": 20.5,
+        "result": "success",
+        "readback_value": 20.5,
+        "ts": "2026-07-09T10:00:00+08:00"
+    }
 }
 ```
 
@@ -782,12 +806,33 @@ Response (200)：
 
 ```json
 {
-    "id": "uuid",
-    "point_name": "加药泵频率",
-    "value": 20.5,
-    "result": "failed",
-    "error": "回读值不匹配: 期望20.5, 实际18.3",
-    "ts": "2026-07-09T10:00:00+08:00"
+    "code": 0,
+    "message": "success",
+    "data": {
+        "id": "uuid",
+        "point_name": "加药泵频率",
+        "value": 20.5,
+        "result": "failed",
+        "error": "回读值不匹配: 期望20.5, 实际18.3",
+        "ts": "2026-07-09T10:00:00+08:00"
+    }
+}
+```
+
+写入超时：
+
+```json
+{
+    "code": 0,
+    "message": "success",
+    "data": {
+        "id": "uuid",
+        "point_name": "加药泵频率",
+        "value": 20.5,
+        "result": "timeout",
+        "error": "写入操作超时: 设备无响应超过30秒",
+        "ts": "2026-07-09T10:00:00+08:00"
+    }
 }
 ```
 
@@ -895,13 +940,16 @@ CREATE INDEX idx_write_logs_time ON write_logs(created_at DESC);
 
 ### 5.4 质量戳判定规则
 
-| 条件 | 质量戳 |
-|------|--------|
-| 协议读取成功，返回有效值 | `good` |
-| 协议读取成功，但值为 null 或解析异常 | `bad` |
-| 协议读取失败（超时/无响应/异常） | `bad` |
-| 设备连接断开 | `bad` |
-| 设备连接断开后，断线期间所有采集点都标记为 `bad` | `bad` |
+| 条件 | 质量戳（API层） | 质量戳（存储层 INT） |
+|------|----------------|---------------------|
+| 协议读取成功，返回有效值 | `good` | `0` |
+| 协议读取成功，但值为 null 或解析异常 | `bad` | `1` |
+| 协议读取失败（超时/无响应/异常） | `bad` | `1` |
+| 设备连接断开 | `bad` | `1` |
+| 设备连接断开后，断线期间所有采集点都标记为 `bad` | `bad` | `1` |
+| 查询时间范围内无对应数据记录 | `none` | 不存在（无记录） |
+
+> **质量戳转换约定**：TDengine 存储 INT 值（0=good, 1=bad），后端 API 层在返回响应时统一转换为字符串格式。前端始终处理字符串格式的质量戳。`none` 状态仅在查询无匹配记录时由 API 层返回，不会出现在 TDengine 存储中。
 
 ### 5.5 断线重连机制
 

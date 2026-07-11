@@ -474,6 +474,8 @@ CREATE UNIQUE INDEX idx_devices_name ON devices(name) WHERE deleted = FALSE;
 | 值 | 统一使用 `DOUBLE`，BOOL 类型存 0/1 |
 | 标签 | 元数据信息存为 TAGS，不做查询条件的有选择缓存 |
 
+> **质量戳转换约定**：TDengine 存储 INT 值（0=good, 1=bad），后端 API 层在返回响应时统一转换为字符串格式。前端始终处理字符串格式的质量戳。`none` 状态仅在查询无匹配记录时由 API 层返回，不会出现在 TDengine 存储中。
+
 ### 6.3 SQL 书写规范
 
 ```sql
@@ -498,6 +500,20 @@ RETURNING id;
 - 连接 DSN 按 `postgres://USER:PASS@HOST:PORT/DB?sslmode=require` 格式组装
 - Go 后端使用连接池，并在应用启动时通过带超时的 `PingContext` 校验连接
 - 数据库连接配置仅由 `.env.example` 提供占位符模板，`.env` 文件必须加入 `.gitignore`
+
+### 6.5 CSV 导入导出格式规范
+
+| 规则 | 说明 |
+|------|------|
+| 编码 | 统一使用 `UTF-8 with BOM`（`charset=utf-8-sig`） |
+| 首行 | 标题行，字段名使用 `snake_case` |
+| 布尔值 | 导出为 `TRUE` / `FALSE`（大写） |
+| 数字 | 整数无小数位，浮点数按实际精度输出 |
+| JSON 字段 | 导出为转义后的 JSON 字符串 |
+| 空值 | 空字段（无匹配数据）统一使用 `—`（全角破折号） |
+| 日期时间 | 格式 `YYYY-MM-DD HH:mm:ss`（24小时制） |
+| 文件扩展名 | `.csv` |
+| 导入校验 | 与对应 API 的校验规则一致，校验失败的行跳过并记录失败原因 |
 
 ---
 
