@@ -141,11 +141,26 @@ CREATE UNIQUE INDEX idx_devices_name ON devices(name) WHERE deleted = FALSE;
 
 #### 2.1.4 设备的业务状态
 
+**持久化状态（数据库）**：
+
 | 状态 | 说明 |
 |------|------|
 | enabled=true | 设备启用，采集引擎会为该设备建立连接并执行采集任务 |
 | enabled=false | 设备禁用，采集引擎跳过该设备，已有连接断开 |
 | deleted=true | 逻辑删除，数据保留但不再显示和使用 |
+
+**运行时连接状态（采集引擎内存维护，不落库）**：
+
+| 连接状态 | 枚举值 | 说明 |
+|---------|--------|------|
+| 连接成功 | `connected` | 设备已启用（enabled=true）且与PLC连接成功，可正常采集 |
+| 连接失败 | `disconnected` | 设备已启用（enabled=true）但连接断开或连接失败（初次连接或重连均失败） |
+| 连接禁用 | `disabled` | 设备未启用（enabled=false），不进行连接。采集引擎不维护该设备的连接状态 |
+
+说明：
+- `connection_status` 是运行时状态，由采集引擎维护在内存中，**不存储到数据库**
+- 设备逻辑删除（deleted=true）时，在接口响应中表现为 `disabled`
+- 采集引擎未运行时，所有 enabled=true 的设备均返回 `disconnected`
 
 ### 2.2 RESTful API
 
@@ -217,6 +232,9 @@ Response (201)：
 
 - 与新增使用相同的请求体结构
 - 修改后，如果设备正在运行中，采集引擎应自动重新连接
+- 如果修改了 enabled 字段（启用/禁用），响应中的 `connection_status` 同步变化：
+  - 从 enabled=false 改为 true → 采集引擎尝试连接，`connection_status` 在异步连接完成前为 `disconnected`
+  - 从 enabled=true 改为 false → `connection_status` 立即变为 `disabled`
 
 **DELETE /api/v1/devices/{id}** — 逻辑删除
 
@@ -288,12 +306,19 @@ Response (200)：
             "connect_timeout": 5,
             "reconnect_interval": 10,
             "protocol_config": { "rack": 0, "slot": 1 },
+            "connection_status": "connected",
             "created_at": "...",
             "updated_at": "..."
         }
     ]
 }
 ```
+
+`connection_status` 字段说明：
+- 由 API Handler 从采集引擎运行时状态中获取后组装到响应中
+- 枚举值：`connected`、`disconnected`、`disabled`
+- enabled=false 时始终为 `disabled`，无需查询引擎运行时状态
+- enabled=true 时，如果采集引擎未运行或查询不到该设备状态，统一返回 `disconnected`
 
 ---
 
@@ -903,6 +928,35 @@ USING collection_data TAGS (
 - 如果 store_history=false，不写入TDengine
 - 写入频率由 history_interval 控制（例如 history_interval=5，则每5分钟写入一条）
 
+### 5.8 运行时状态查询接口
+
+采集引擎需要对外提供设备连接状态的查询能力，供 API Handler 层在组装设备列表/详情响应时获取。
+
+```
+采集引擎内部维护：
+  deviceConnections map[string]ConnectionState  // key: device_id
+
+  type ConnectionState struct {
+      Status   string    // "connected" | "disconnected"
+      Since    time.Time // 状态持续起始时间
+  }
+
+对外暴露的查询方法（在采集引擎实例上）：
+  func (m *CollectorManager) GetDeviceStatus(deviceID string) string
+  func (m *CollectorManager) GetDeviceStatusMap() map[string]string
+```
+
+状态查询规则：
+
+| 条件 | 返回状态 |
+|------|---------|
+| 设备不在映射表中（引擎未初始化该设备） | `disconnected` |
+| 设备在映射表中且连接成功 | `connected` |
+| 设备在映射表中但连接已断开 | `disconnected` |
+| 引擎未启动或不可用 | `disconnected` |
+
+> 采集引擎以单例模式运行在服务端进程中，API Handler 通过依赖注入获取引擎实例的引用，直接调用 `GetDeviceStatusMap()` 查询状态。
+
 ---
 
 ## 6. 写入引擎（运行时）
@@ -1051,22 +1105,17 @@ func GetProtocol(protocolType string) (ProtocolDriver, error) {
 
 ## 附录A：前端页面结构参考
 
-### A.1 页面布局（左侧导航栏）
+### A.1 页面布局
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  ┌──────────┐  ┌──────────────────────────────────┐ │
-│  │  ▽ 数据管理 │  │                                    │ │
-│  │    设备管理 │  │         内容区域                    │ │
-│  │    数据采集 │  │                                    │ │
-│  │    数据写入 │  │                                    │ │
-│  │          │  │                                    │ │
-│  │  ○ 实时监控  │  │                                    │ │
-│  │  ○ 智能控制  │  │                                    │ │
-│  │  ○ 历史分析  │  │                                    │ │
-│  │  ○ 系统配置  │  │                                    │ │
-│  └──────────┘  └──────────────────────────────────┘ │
-└─────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────┐
+│  ┌──────────┐  ┌───────────────────────┐ │
+│  │  ▽ 数据管理 │  │                        │ │
+│  │    设备管理 │  │      内容区域           │ │
+│  │    数据采集 │  │                        │ │
+│  │    数据写入 │  │                        │ │
+│  └──────────┘  └───────────────────────┘ │
+└──────────────────────────────────────────┘
 ```
 
 左侧导航栏说明：
@@ -1074,7 +1123,6 @@ func GetProtocol(protocolType string) (ProtocolDriver, error) {
 - 当前展开的主菜单：**数据管理**
 - 展开后显示三个子菜单项：**设备管理**、**数据采集**、**数据写入**
 - 点击子菜单项，右侧内容区域切换对应页面
-- 其他主菜单（实时监控、智能控制、历史分析、系统配置）为后续模块占位，当前不可展开
 
 ### A.2 子页面：设备管理
 
