@@ -1,0 +1,2 @@
+CREATE STABLE IF NOT EXISTS collection_data (ts TIMESTAMP,`value` DOUBLE,quality INT,quality_reason VARCHAR(32),point_id VARCHAR(36),point_name VARCHAR(128)) TAGS(device_id VARCHAR(36),device_name VARCHAR(128),data_type VARCHAR(16));
+CREATE STABLE IF NOT EXISTS computed_data (ts TIMESTAMP,`value` DOUBLE,quality INT,quality_reason VARCHAR(32),point_id VARCHAR(36),point_name VARCHAR(128),source VARCHAR(32)) TAGS(category VARCHAR(32));
