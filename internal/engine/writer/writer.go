@@ -19,9 +19,13 @@ type Result struct {
 	TS              time.Time
 }
 
+// REAL values are compared with a fixed protocol precision. The tolerance is
+// intentionally not part of the write-point configuration anymore.
+const realReadbackPrecision = 0.0001
+
 func (e *Engine) Execute(ctx context.Context, p pg.PointRow, value float64) (Result, error) {
-	if !p.Enabled || !p.WriteEnabled {
-		return Result{}, errors.New("写入点未启用或写入开关关闭")
+	if !p.WriteEnabled {
+		return Result{}, errors.New("写入点未允许写入")
 	}
 	c, err := e.Manager.Connection(ctx, p.DeviceID)
 	if err != nil {
@@ -39,7 +43,7 @@ func (e *Engine) Execute(ctx context.Context, p pg.PointRow, value float64) (Res
 		}
 		ok := actual == value
 		if dt == protocol.Real {
-			ok = math.Abs(actual-value) <= p.ReadbackTolerance
+			ok = math.Abs(actual-value) <= realReadbackPrecision
 		}
 		if ok {
 			return Result{value, actual, time.Now()}, nil

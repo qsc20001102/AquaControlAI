@@ -76,6 +76,24 @@ func (s *Store) HasData(ctx context.Context, id uuid.UUID) bool {
 	var n int
 	return s.DB.QueryRowContext(ctx, q).Scan(&n) == nil && n > 0
 }
+
+// DropTables removes the per-point child tables for the supplied archived
+// points. The caller is responsible for selecting only points that have no
+// realtime metadata; TableName validates every derived identifier.
+func (s *Store) DropTables(ctx context.Context, ids []uuid.UUID) (int, error) {
+	removed := 0
+	for _, id := range ids {
+		if !s.HasData(ctx, id) {
+			continue
+		}
+		q := fmt.Sprintf("DROP TABLE IF EXISTS `%s`.`%s`", s.Database, TableName(id))
+		if _, e := s.DB.ExecContext(ctx, q); e != nil {
+			return removed, e
+		}
+		removed++
+	}
+	return removed, nil
+}
 func (s *Store) Query(ctx context.Context, id uuid.UUID, start, end time.Time) ([]Sample, error) {
 	shanghai := time.FixedZone("Asia/Shanghai", 8*60*60)
 	q := fmt.Sprintf("SELECT ts,`value`,quality,quality_reason FROM `%s`.`%s` WHERE ts >= %s AND ts <= %s ORDER BY ts", s.Database, TableName(id), sqlString(start.In(shanghai).Format("2006-01-02 15:04:05.000")), sqlString(end.In(shanghai).Format("2006-01-02 15:04:05.000")))
@@ -91,6 +109,10 @@ func (s *Store) Query(ctx context.Context, id uuid.UUID, start, end time.Time) (
 		if e = rows.Scan(&x.TS, &x.Value, &quality, &x.QualityReason); e != nil {
 			return nil, e
 		}
+		// The REST driver returns TDengine's local wall-clock timestamp with a
+		// UTC location. Rebuild it in Asia/Shanghai instead of converting the
+		// instant, otherwise an eight-hour offset would be applied twice.
+		x.TS = time.Date(x.TS.Year(), x.TS.Month(), x.TS.Day(), x.TS.Hour(), x.TS.Minute(), x.TS.Second(), x.TS.Nanosecond(), shanghai)
 		if quality == 0 {
 			x.Quality = "good"
 		} else {

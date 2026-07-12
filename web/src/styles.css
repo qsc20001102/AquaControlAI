@@ -209,6 +209,18 @@ main {
 .btn:hover {
   border-color: #3f5d67;
 }
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.spin {
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
 .panel {
   background: rgba(9, 23, 29, 0.9);
   border: 1px solid var(--line);
@@ -332,7 +344,7 @@ main {
   font-size: 12px;
   color: #9db0b6;
 }
-.field input,
+.field input:not([type="checkbox"]),
 .field select {
   width: 100%;
 }
@@ -347,6 +359,71 @@ main {
 }
 .switch {
   accent-color: var(--green);
+}
+.check-field {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #0b1920;
+  color: #c7d8d5;
+  cursor: pointer;
+  user-select: none;
+  transition:
+    border-color 0.14s ease,
+    background 0.14s ease,
+    color 0.14s ease;
+}
+.check-field-wide {
+  grid-column: 1 / -1;
+}
+.check-field input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.check-box {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #45616a;
+  border-radius: 4px;
+  background: #07141a;
+  transition:
+    border-color 0.14s ease,
+    background 0.14s ease,
+    box-shadow 0.14s ease;
+}
+.check-box::after {
+  content: "";
+  width: 8px;
+  height: 4px;
+  border-left: 2px solid #041006;
+  border-bottom: 2px solid #041006;
+  transform: rotate(-45deg) scale(0);
+  transition: transform 0.14s ease;
+}
+.check-field:has(input:checked) {
+  border-color: rgba(99, 240, 79, 0.55);
+  background: rgba(99, 240, 79, 0.09);
+  color: #dff8dc;
+}
+.check-field:has(input:checked) .check-box {
+  border-color: var(--green);
+  background: var(--green);
+  box-shadow: 0 0 12px rgba(99, 240, 79, 0.22);
+}
+.check-field:has(input:checked) .check-box::after {
+  transform: rotate(-45deg) scale(1);
+}
+.check-field:focus-within {
+  outline: 2px solid rgba(99, 240, 79, 0.35);
+  outline-offset: 1px;
 }
 .collection-layout {
   display: grid;

@@ -190,8 +190,6 @@ func (s *Service) SavePoint(ctx context.Context, kind string, p *pg.PointRow) er
 		if p.HistoryInterval < 1 || p.HistoryInterval > 1440 {
 			return errors.New("history_interval必须为1~1440")
 		}
-	} else if p.ReadbackTolerance < 0 || p.ReadbackTolerance > 1000000 {
-		return errors.New("readback_tolerance超出范围")
 	}
 	return s.Store.SavePoint(ctx, kind, p)
 }

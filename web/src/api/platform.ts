@@ -32,6 +32,7 @@ export const writePointApi = {
 };
 export const historyApi = {
   tree: () => request.get("/history/tree"),
+  cleanupArchives: () => request.post("/history/archive/cleanup"),
   query: (data: unknown) => request.post("/history/query", data),
   queryTable: (data: unknown) => request.post("/history/query-table", data),
 };

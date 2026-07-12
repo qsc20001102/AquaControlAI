@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from "vue";
-import { Download, Plus, Search, Upload } from "lucide-vue-next";
+import { Download, Plus, RefreshCw, Search, Upload } from "lucide-vue-next";
 import { deviceApi, exportConfig, importConfig } from "@/api/platform";
 type Device = {
   id: string;
@@ -76,16 +76,24 @@ async function save() {
         ? { rack: form.rack, slot: form.slot }
         : { unit_id: 1, float32_order: "ABCD" },
   };
-  editing.value
-    ? await deviceApi.update(editing.value, data)
-    : await deviceApi.create(data);
-  show.value = false;
-  await load();
+  try {
+    editing.value
+      ? await deviceApi.update(editing.value, data)
+      : await deviceApi.create(data);
+    show.value = false;
+    await load();
+  } catch (e) {
+    alert(e instanceof Error ? e.message : "保存设备失败");
+  }
 }
 async function remove(id: string) {
   if (confirm("确认删除？该设备下所有采集点和写入点将同步逻辑删除。")) {
-    await deviceApi.remove(id);
-    await load();
+    try {
+      await deviceApi.remove(id);
+      await load();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "删除设备失败");
+    }
   }
 }
 onMounted(load);
@@ -135,6 +143,9 @@ function formatTime(value?: string) {
         /></label>
         <button class="btn" @click="exportConfig('devices')">
           <Download />导出CSV
+        </button>
+        <button class="btn" :disabled="loading" @click="load">
+          <RefreshCw :class="loading && 'spin'" />刷新数据
         </button>
         <button class="btn btn-primary" @click="open()">
           <Plus />新增设备
@@ -239,11 +250,11 @@ function formatTime(value?: string) {
               type="number"
               min="1"
               max="3600" /></label
-          ><label class="field field-wide"
-            ><span
-              ><input v-model="form.enabled" type="checkbox" /> 启用设备</span
-            ></label
-          >
+          ><label class="check-field check-field-wide">
+            <input v-model="form.enabled" type="checkbox" />
+            <span class="check-box" aria-hidden="true"></span>
+            <span class="check-text">启用设备</span>
+          </label>
         </div>
         <div class="modal-actions">
           <button type="button" class="btn" @click="show = false">取消</button

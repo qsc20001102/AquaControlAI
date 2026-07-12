@@ -39,6 +39,8 @@ func main() {
 	must(e)
 	_, e = db.Exec(ctx, migrations.PostgreSQLGroups)
 	must(e)
+	_, e = db.Exec(ctx, migrations.PostgreSQLWritePoints)
+	must(e)
 	db.Close()
 	pgStore, e := pg.Open(ctx, cfg.PostgresDSN)
 	must(e)

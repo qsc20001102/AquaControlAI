@@ -119,6 +119,7 @@ func (e *Engine) collect(ctx context.Context, p pg.PointRow) {
 			value = &v
 			quality = 0
 			reason = nil
+			e.manager.MarkConnected(p.DeviceID)
 		} else {
 			reasonText = "read_error"
 			reason = &reasonText

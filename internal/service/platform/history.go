@@ -36,9 +36,21 @@ func (h *History) Tree(ctx context.Context) ([]map[string]any, error) {
 	if e != nil {
 		return nil, e
 	}
+	deletedIDs, e := h.PG.ListDeletedCollectionPointIDs(ctx)
+	if e != nil {
+		return nil, e
+	}
+	deviceActive, e := h.PG.ListDeviceActivity(ctx)
+	if e != nil {
+		return nil, e
+	}
+	deleted := make(map[uuid.UUID]bool, len(deletedIDs))
+	for _, id := range deletedIDs {
+		deleted[id] = true
+	}
 	groups := map[string][]map[string]any{}
 	for _, p := range points {
-		active := p.Enabled && p.StoreHistory
+		active := p.Enabled && p.StoreHistory && deviceActive[p.DeviceID]
 		has := h.TD.HasData(ctx, p.ID)
 		if !active && !has {
 			continue
@@ -51,7 +63,7 @@ func (h *History) Tree(ctx context.Context) ([]map[string]any, error) {
 		if h.Collector != nil && life == "active" {
 			latest = h.Collector.Latest(p.ID)
 		}
-		groups[p.GroupName] = append(groups[p.GroupName], map[string]any{"id": p.ID, "name": p.Name, "type": "collection", "data_type": p.DataType, "unit": p.Unit, "history_interval": p.HistoryInterval, "device_id": p.DeviceID, "device_name": p.DeviceName, "group_name": p.GroupName, "lifecycle_status": life, "has_history_data": has, "latest_value": latest})
+		groups[p.GroupName] = append(groups[p.GroupName], map[string]any{"id": p.ID, "name": p.Name, "type": "collection", "data_type": p.DataType, "unit": p.Unit, "history_interval": p.HistoryInterval, "device_id": p.DeviceID, "device_name": p.DeviceName, "group_name": p.GroupName, "lifecycle_status": life, "has_history_data": has, "can_cleanup": deleted[p.ID], "latest_value": latest})
 	}
 	names := make([]string, 0, len(groups))
 	for n := range groups {
@@ -65,6 +77,16 @@ func (h *History) Tree(ctx context.Context) ([]map[string]any, error) {
 	}
 	tree = append(tree, map[string]any{"id": "internal-data", "name": "内部数据", "type": "reserved", "children": []map[string]any{{"id": "placeholder", "name": "暂无数据", "type": "placeholder", "disabled": true}}})
 	return tree, nil
+}
+
+// CleanupDeletedArchives drops TDengine history tables only for collection
+// points that have been logically deleted (or belong to a deleted device).
+func (h *History) CleanupDeletedArchives(ctx context.Context) (int, error) {
+	ids, e := h.PG.ListDeletedCollectionPointIDs(ctx)
+	if e != nil {
+		return 0, e
+	}
+	return h.TD.DropTables(ctx, ids)
 }
 func (h *History) Query(ctx context.Context, ids []uuid.UUID, start, end time.Time, max int) ([]Series, error) {
 	meta, e := h.PG.ListPoints(ctx, "collection", "", true)
@@ -159,6 +181,9 @@ type TableResult struct {
 }
 
 func (h *History) QueryTable(ctx context.Context, ids []uuid.UUID, start, end time.Time, minutes int) (TableResult, error) {
+	shanghai := time.FixedZone("Asia/Shanghai", 8*60*60)
+	start = start.In(shanghai)
+	end = end.In(shanghai)
 	step := time.Duration(minutes) * time.Minute
 	times := []time.Time{}
 	for t := start; !t.After(end); t = t.Add(step) {

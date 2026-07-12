@@ -57,6 +57,7 @@ func NewRouter(h *Handler) *gin.Engine {
 	v.POST("/write-points/:id/write", h.writePoint)
 	v.GET("/write-logs", h.logs)
 	v.GET("/history/tree", h.tree)
+	v.POST("/history/archive/cleanup", h.cleanupHistoryArchive)
 	v.POST("/history/query", h.historyQuery)
 	v.POST("/history/query-table", h.historyTable)
 	v.POST("/history/export", h.exportHistory)
@@ -182,8 +183,10 @@ func (h *Handler) points(kind string) gin.HandlerFunc {
 			if v := c.Query("data_type"); v != "" && p.DataType != v {
 				continue
 			}
-			if v := c.Query("enabled"); v != "" && strconv.FormatBool(p.Enabled) != v {
-				continue
+			if kind == "collection" {
+				if v := c.Query("enabled"); v != "" && strconv.FormatBool(p.Enabled) != v {
+					continue
+				}
 			}
 			if kind == "write" {
 				if v := c.Query("write_enabled"); v != "" && strconv.FormatBool(p.WriteEnabled) != v {
@@ -332,9 +335,9 @@ func (h *Handler) exportConfig(kind string) gin.HandlerFunc {
 				w.Write([]string{p.Name, p.GroupName, p.DeviceName, p.Address, p.DataType, stringValue(p.Unit), strconv.Itoa(p.CollectInterval), strings.ToUpper(strconv.FormatBool(p.StoreHistory)), strconv.Itoa(p.HistoryInterval), strings.ToUpper(strconv.FormatBool(p.Enabled))})
 			}
 		} else {
-			w.Write([]string{"name", "group_name", "device_name", "address", "data_type", "unit", "enabled", "write_enabled", "readback_tolerance"})
+			w.Write([]string{"name", "group_name", "device_name", "address", "data_type", "unit", "write_enabled"})
 			for _, p := range items {
-				w.Write([]string{p.Name, p.GroupName, p.DeviceName, p.Address, p.DataType, stringValue(p.Unit), strings.ToUpper(strconv.FormatBool(p.Enabled)), strings.ToUpper(strconv.FormatBool(p.WriteEnabled)), strconv.FormatFloat(p.ReadbackTolerance, 'g', -1, 64)})
+				w.Write([]string{p.Name, p.GroupName, p.DeviceName, p.Address, p.DataType, stringValue(p.Unit), strings.ToUpper(strconv.FormatBool(p.WriteEnabled))})
 			}
 		}
 	}
@@ -344,12 +347,6 @@ func stringValue(v *string) string {
 		return ""
 	}
 	return *v
-}
-func floatPtr(v *float64) string {
-	if v == nil {
-		return ""
-	}
-	return strconv.FormatFloat(*v, 'g', -1, 64)
 }
 func (h *Handler) importConfig(kind string) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -419,9 +416,13 @@ func (h *Handler) importRow(ctx context.Context, kind string, head map[string]in
 	}
 	existing, e := h.Platform.FindPointByName(ctx, kind, get("name"))
 	created := platform.IsNotFound(e)
-	enabled, be := parseCSVBool(get("enabled"), true)
-	if be != nil {
-		return false, be
+	enabled := true
+	if kind == "collection" {
+		var be error
+		enabled, be = parseCSVBool(get("enabled"), true)
+		if be != nil {
+			return false, be
+		}
 	}
 	unit := get("unit")
 	p := postgres.PointRow{ID: uuid.Nil, Name: get("name"), GroupName: get("group_name"), DeviceID: device.ID, Enabled: enabled, Address: get("address"), DataType: get("data_type"), Unit: &unit}
@@ -434,7 +435,6 @@ func (h *Handler) importRow(ctx context.Context, kind string, head map[string]in
 		p.HistoryInterval = parseInt(get("history_interval"), 1)
 	} else {
 		p.WriteEnabled, _ = parseCSVBool(get("write_enabled"), false)
-		p.ReadbackTolerance = parseFloat(get("readback_tolerance"), .0001)
 	}
 	return created, h.Platform.SavePoint(ctx, kind, &p)
 }
@@ -443,16 +443,6 @@ func parseInt(v string, d int) int {
 		return d
 	}
 	n, e := strconv.Atoi(v)
-	if e != nil {
-		return d
-	}
-	return n
-}
-func parseFloat(v string, d float64) float64 {
-	if v == "" {
-		return d
-	}
-	n, e := strconv.ParseFloat(v, 64)
 	if e != nil {
 		return d
 	}
@@ -467,19 +457,18 @@ func parseCSVBool(v string, d bool) (bool, error) {
 func (h *Handler) savePoint(kind string, update bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var p struct {
-			ID                uuid.UUID `json:"-"`
-			Name              string    `json:"name"`
-			GroupName         string    `json:"group_name"`
-			DeviceID          uuid.UUID `json:"device_id"`
-			Enabled           *bool     `json:"enabled"`
-			WriteEnabled      bool      `json:"write_enabled"`
-			Address           string    `json:"address"`
-			DataType          string    `json:"data_type"`
-			Unit              *string   `json:"unit"`
-			CollectInterval   int       `json:"collect_interval"`
-			StoreHistory      *bool     `json:"store_history"`
-			HistoryInterval   int       `json:"history_interval"`
-			ReadbackTolerance float64   `json:"readback_tolerance"`
+			ID              uuid.UUID `json:"-"`
+			Name            string    `json:"name"`
+			GroupName       string    `json:"group_name"`
+			DeviceID        uuid.UUID `json:"device_id"`
+			Enabled         *bool     `json:"enabled"`
+			WriteEnabled    bool      `json:"write_enabled"`
+			Address         string    `json:"address"`
+			DataType        string    `json:"data_type"`
+			Unit            *string   `json:"unit"`
+			CollectInterval int       `json:"collect_interval"`
+			StoreHistory    *bool     `json:"store_history"`
+			HistoryInterval int       `json:"history_interval"`
 		}
 		if e := c.ShouldBindJSON(&p); e != nil {
 			response.Error(c, 400, 41001, "参数格式错误", nil)
@@ -508,10 +497,10 @@ func (h *Handler) savePoint(kind string, update bool) gin.HandlerFunc {
 		if p.HistoryInterval == 0 {
 			p.HistoryInterval = 1
 		}
-		if p.ReadbackTolerance == 0 {
-			p.ReadbackTolerance = .0001
+		if kind == "write" {
+			enabled = false
 		}
-		row := postgres.PointRow{ID: id, Name: p.Name, GroupName: p.GroupName, DeviceID: p.DeviceID, Enabled: enabled, WriteEnabled: p.WriteEnabled, Address: p.Address, DataType: p.DataType, Unit: p.Unit, CollectInterval: p.CollectInterval, StoreHistory: storeHistory, HistoryInterval: p.HistoryInterval, ReadbackTolerance: p.ReadbackTolerance}
+		row := postgres.PointRow{ID: id, Name: p.Name, GroupName: p.GroupName, DeviceID: p.DeviceID, Enabled: enabled, WriteEnabled: p.WriteEnabled, Address: p.Address, DataType: p.DataType, Unit: p.Unit, CollectInterval: p.CollectInterval, StoreHistory: storeHistory, HistoryInterval: p.HistoryInterval, PointKind: kind}
 		if e := h.Platform.SavePoint(c, kind, &row); e != nil {
 			code := 41001
 			if kind == "write" {
@@ -617,6 +606,15 @@ func (h *Handler) tree(c *gin.Context) {
 		return
 	}
 	response.OK(c, map[string]any{"tree": tree})
+}
+
+func (h *Handler) cleanupHistoryArchive(c *gin.Context) {
+	count, e := h.History.CleanupDeletedArchives(c)
+	if e != nil {
+		serverError(c, e)
+		return
+	}
+	response.OK(c, map[string]int{"deleted_points": count})
 }
 
 type historyRequest struct {

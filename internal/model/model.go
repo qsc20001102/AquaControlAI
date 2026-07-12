@@ -35,6 +35,5 @@ type Point struct {
 	HistoryInterval                             int
 	HistoryStartedAt                            *time.Time
 	WriteEnabled                                bool
-	ReadbackTolerance                           float64
 	CreatedAt, UpdatedAt                        time.Time
 }

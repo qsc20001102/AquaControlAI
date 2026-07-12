@@ -100,8 +100,18 @@ func (m *Manager) Times(id uuid.UUID) (online, offline *time.Time) {
 }
 func (m *Manager) MarkDisconnected(id uuid.UUID) {
 	m.mu.Lock()
+	if m.statuses[id] != "disconnected" {
+		m.lastOffline[id] = time.Now()
+	}
 	m.statuses[id] = "disconnected"
-	m.lastOffline[id] = time.Now()
+	m.mu.Unlock()
+}
+func (m *Manager) MarkConnected(id uuid.UUID) {
+	m.mu.Lock()
+	if m.statuses[id] != "connected" {
+		m.lastOnline[id] = time.Now()
+	}
+	m.statuses[id] = "connected"
 	m.mu.Unlock()
 }
 func (m *Manager) setStatus(id uuid.UUID, s string) {

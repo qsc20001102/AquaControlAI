@@ -3,6 +3,7 @@ import { onMounted, reactive, ref } from "vue";
 import {
   Download,
   Plus,
+  RefreshCw,
   Search,
   Upload,
   FolderPlus,
@@ -17,6 +18,7 @@ import {
 } from "@/api/platform";
 const items = ref<any[]>([]),
   devices = ref<any[]>([]),
+  loading = ref(false),
   keyword = ref(""),
   show = ref(false),
   editing = ref<string | null>(null);
@@ -52,33 +54,45 @@ async function loadGroups() {
   const r: any = await collectionApi.groups();
   groups.value = r.data.groups;
 }
+async function refresh() {
+  if (loading.value) return;
+  loading.value = true;
+  try {
+    await Promise.all([loadGroups(), load()]);
+  } catch {
+    alert("刷新数据失败，请稍后重试");
+  } finally {
+    loading.value = false;
+  }
+}
 async function addGroup() {
   const name = prompt("请输入新分组名称")?.trim();
   if (!name) return;
   await collectionApi.createGroup(name);
   selectedGroup.value = name;
-  await loadGroups();
-  await load();
+  await refresh();
 }
 async function editGroup(g: any) {
   const name = prompt("修改分组名称", g.name)?.trim();
   if (!name || name === g.name) return;
   await collectionApi.updateGroup(g.name, name);
   if (selectedGroup.value === g.name) selectedGroup.value = name;
-  await loadGroups();
-  await load();
+  await refresh();
 }
 async function deleteGroup(g: any) {
   if (g.name === "default") {
     alert("default 分组不可删除");
     return;
   }
-  if (!confirm(`删除分组“${g.name}”后，里面的采集点也会跟着删除，是否继续？`))
+  if (
+    !confirm(
+      `删除分组“${g.name}”后，里面的采集点和写入点会自动转移到 default 分组，是否继续？`,
+    )
+  )
     return;
   await collectionApi.removeGroup(g.name);
   if (selectedGroup.value === g.name) selectedGroup.value = "";
-  await loadGroups();
-  await load();
+  await refresh();
 }
 function open(p?: any) {
   editing.value = p?.id ?? null;
@@ -102,16 +116,24 @@ function open(p?: any) {
   show.value = true;
 }
 async function save() {
-  editing.value
-    ? await collectionApi.update(editing.value, form)
-    : await collectionApi.create(form);
-  show.value = false;
-  await load();
+  try {
+    editing.value
+      ? await collectionApi.update(editing.value, form)
+      : await collectionApi.create(form);
+    show.value = false;
+    await refresh();
+  } catch (e) {
+    alert(e instanceof Error ? e.message : "保存采集点失败");
+  }
 }
 async function remove(id: string) {
   if (confirm("确认删除该采集点？")) {
-    await collectionApi.remove(id);
-    await load();
+    try {
+      await collectionApi.remove(id);
+      await refresh();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "删除采集点失败");
+    }
   }
 }
 async function upload(e: Event) {
@@ -121,14 +143,18 @@ async function upload(e: Event) {
   alert(
     `导入完成：新增${r.data.created}，更新${r.data.updated}，失败${r.data.failed}`,
   );
-  await load();
+  await refresh();
 }
 onMounted(async () => {
   const r: any = await deviceApi.list({ page_size: 100 });
   devices.value = r.data.items;
-  await loadGroups();
-  await load();
+  await refresh();
 });
+function formatTime(value?: string) {
+  return value
+    ? new Date(value).toLocaleString("zh-CN", { hour12: false })
+    : "—";
+}
 </script>
 <template>
   <section>
@@ -194,6 +220,9 @@ onMounted(async () => {
             <button class="btn" @click="exportConfig('collection-points')">
               <Download />导出CSV
             </button>
+            <button class="btn" :disabled="loading" @click="refresh">
+              <RefreshCw :class="loading && 'spin'" />刷新数据
+            </button>
             <button class="btn btn-primary" @click="open()">
               <Plus />新增采集点
             </button>
@@ -219,6 +248,7 @@ onMounted(async () => {
                 <th>历史</th>
                 <th>最新值</th>
                 <th>质量</th>
+                <th>更新时间</th>
                 <th>操作</th>
               </tr>
             </thead>
@@ -245,6 +275,7 @@ onMounted(async () => {
                 >
                   {{ p.latest_value?.quality ?? "none" }}
                 </td>
+                <td>{{ formatTime(p.latest_value?.ts) }}</td>
                 <td>
                   <button class="btn" @click="open(p)">编辑</button>
                   <button class="btn" @click="remove(p.id)">删除</button>
@@ -309,16 +340,16 @@ onMounted(async () => {
               min="1"
               max="1440"
           /></label>
-          <label class="field"
-            ><span
-              ><input v-model="form.enabled" type="checkbox" /> 启用</span
-            ></label
-          ><label class="field"
-            ><span
-              ><input v-model="form.store_history" type="checkbox" />
-              存储历史</span
-            ></label
-          >
+          <label class="check-field">
+            <input v-model="form.enabled" type="checkbox" />
+            <span class="check-box" aria-hidden="true"></span>
+            <span class="check-text">启用采集</span>
+          </label>
+          <label class="check-field">
+            <input v-model="form.store_history" type="checkbox" />
+            <span class="check-box" aria-hidden="true"></span>
+            <span class="check-text">存储历史</span>
+          </label>
         </div>
         <div class="modal-actions">
           <button type="button" class="btn" @click="show = false">取消</button

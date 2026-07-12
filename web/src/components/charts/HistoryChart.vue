@@ -2,64 +2,404 @@
 import * as echarts from "echarts";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { buildSegmentedAxis, mapValue, unmapValue } from "./segmented-axis";
-const props = defineProps<{ series: any[]; segmented: boolean }>();
+
+const props = defineProps<{
+  series: any[];
+  segmented: boolean;
+  startTime: number;
+  endTime: number;
+}>();
 const emit = defineEmits<{ cursor: [any[]] }>();
 const el = ref<HTMLDivElement>();
-let chart: echarts.ECharts | undefined, observer: ResizeObserver | undefined;
+let chart: echarts.ECharts | undefined;
+let observer: ResizeObserver | undefined;
+let currentNames: string[] = [];
+let visibleNames: Record<string, boolean> = {};
+let lastCursorTime: number | null = null;
+let cursorFrame: number | undefined;
+const gridTop = 58;
+const gridBottom = 52;
+
 const segments = computed(() =>
   buildSegmentedAxis(
     props.series.flatMap((s) =>
-      s.data.filter((d: any) => d.value !== null).map((d: any) => d.value),
+      (s.data ?? [])
+        .filter((d: any) => d.value !== null && d.value !== undefined)
+        .map((d: any) => d.value),
     ),
   ),
 );
-function render() {
+const range = computed(() => Math.max(1, props.endTime - props.startTime || 1));
+const colors = [
+  "#63f04f",
+  "#18d7e9",
+  "#f3bd42",
+  "#c68cff",
+  "#ff8f66",
+  "#73b7ff",
+];
+
+function timestamp(value: any) {
+  if (typeof value === "number") return value;
+  const result = new Date(value).getTime();
+  return Number.isFinite(result) ? result : NaN;
+}
+function displayValue(value: any) {
+  return typeof value === "number" ? Number(value.toFixed(3)) : value;
+}
+function axisLabel(value: number) {
+  const date = new Date(value);
+  const parts = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(date);
+  const part = (type: string) =>
+    parts.find((x) => x.type === type)?.value ?? "";
+  if (range.value <= 2 * 3600000)
+    return `${part("hour")}:${part("minute")}:${part("second")}`;
+  return `${part("month")}-${part("day")} ${part("hour")}:${part("minute")}`;
+}
+function splitNumber() {
+  if (range.value <= 2 * 3600000) return 8;
+  if (range.value <= 24 * 3600000) return 10;
+  if (range.value <= 7 * 24 * 3600000) return 8;
+  return 7;
+}
+function seriesName(s: any, index: number, used: Set<string>) {
+  const base = `${s.point_name}${s.unit ? ` (${s.unit})` : ""}`;
+  if (!used.has(base)) {
+    used.add(base);
+    return base;
+  }
+  const name = `${base} #${index + 1}`;
+  used.add(name);
+  return name;
+}
+function pointRows(s: any) {
+  return (s.data ?? [])
+    .map((d: any) => ({ ...d, time: timestamp(d.ts) }))
+    .filter((d: any) => Number.isFinite(d.time))
+    .sort((a: any, b: any) => a.time - b.time);
+}
+function cursorRow(s: any, target: number) {
+  const points = pointRows(s);
+  const cursorTS = new Date(target).toISOString();
+  const base = {
+    pointId: s.point_id,
+    pointName: s.point_name,
+    ts: cursorTS,
+    value: null as number | null,
+    quality: "none",
+    qualityReason: null as string | null,
+    unit: s.unit,
+    interpolated: false,
+  };
+  if (
+    !points.length ||
+    target < points[0].time ||
+    target > points.at(-1).time
+  ) {
+    return base;
+  }
+  let nearest = points[0];
+  for (const point of points) {
+    if (Math.abs(point.time - target) < Math.abs(nearest.time - target)) {
+      nearest = point;
+    }
+  }
+  if (Math.abs(nearest.time - target) <= 1) {
+    return {
+      ...base,
+      value: nearest.value ?? null,
+      quality: nearest.quality ?? "none",
+      qualityReason: nearest.quality_reason ?? null,
+    };
+  }
+  const numeric = points.filter(
+    (point: any) => point.value !== null && point.value !== undefined,
+  );
+  if (!numeric.length) {
+    return {
+      ...base,
+      quality: nearest.quality ?? "none",
+      qualityReason: nearest.quality_reason ?? null,
+    };
+  }
+  let before: any;
+  let after: any;
+  for (const point of numeric) {
+    if (point.time <= target) before = point;
+    if (point.time >= target) {
+      after = point;
+      break;
+    }
+  }
+  if (before && after && before.time !== after.time) {
+    const ratio = (target - before.time) / (after.time - before.time);
+    const badBetween = points.some(
+      (point: any) =>
+        point.time > before.time &&
+        point.time < after.time &&
+        point.quality === "bad",
+    );
+    return {
+      ...base,
+      value: before.value + (after.value - before.value) * ratio,
+      quality:
+        before.quality === "bad" || after.quality === "bad" || badBetween
+          ? "bad"
+          : "good",
+      qualityReason: before.quality_reason ?? after.quality_reason ?? null,
+      interpolated: true,
+    };
+  }
+  const edge = before ?? after;
+  return {
+    ...base,
+    value: edge.value ?? null,
+    quality: edge.quality ?? "none",
+    qualityReason: edge.quality_reason ?? null,
+    interpolated: true,
+  };
+}
+function cursorRows(target: number) {
+  return props.series
+    .map((s: any, index: number) => {
+      const name = currentNames[index];
+      return visibleNames[name] === false ? null : cursorRow(s, target);
+    })
+    .filter(Boolean);
+}
+function emitCursorAt(target: number) {
+  if (!Number.isFinite(target)) return;
+  lastCursorTime = Math.min(Math.max(target, props.startTime), props.endTime);
+  scheduleVisualCursor(lastCursorTime);
+  emit("cursor", cursorRows(lastCursorTime));
+}
+function scheduleVisualCursor(target: number) {
+  if (cursorFrame !== undefined) cancelAnimationFrame(cursorFrame);
+  cursorFrame = requestAnimationFrame(() => {
+    cursorFrame = undefined;
+    updateVisualCursor(target);
+  });
+}
+function updateVisualCursor(target: number) {
   if (!chart) return;
-  const colors = ["#63f04f", "#18d7e9", "#f3bd42", "#c68cff"];
+  const pixel = chart.convertToPixel({ gridIndex: 0 }, [target, 0]) as number[];
+  if (!Number.isFinite(pixel?.[0])) return;
   chart.setOption(
     {
-      animationDuration: 350,
+      graphic: [
+        {
+          id: "history-cursor-line",
+          type: "line",
+          left: pixel[0],
+          top: gridTop,
+          shape: {
+            x1: 0,
+            y1: 0,
+            x2: 0,
+            y2: Math.max(1, chart.getHeight() - gridTop - gridBottom),
+          },
+          style: {
+            stroke: "#dbeee8",
+            lineWidth: 1,
+            lineDash: [5, 5],
+            opacity: 0.9,
+          },
+          animation: false,
+          silent: true,
+          z: 100,
+        },
+      ],
+    },
+    { lazyUpdate: true },
+  );
+}
+function handleMouseMove(event: any) {
+  if (!chart) return;
+  const x = event.zrX ?? event.offsetX;
+  const y = event.zrY ?? event.offsetY;
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+  const converted = chart.convertFromPixel({ gridIndex: 0 }, [
+    x,
+    y,
+  ]) as number[];
+  const target = timestamp(converted?.[0]);
+  if (Number.isFinite(target)) emitCursorAt(target);
+}
+function handleLegendChange(event: any) {
+  visibleNames = { ...(event.selected ?? {}) };
+  if (lastCursorTime !== null) emitCursorAt(lastCursorTime);
+}
+function render() {
+  if (!chart) return;
+  const option = (chart.getOption?.() as any) ?? {};
+  const previous = option.legend?.[0]?.selected ?? {};
+  const used = new Set<string>();
+  currentNames = props.series.map((s: any, i: number) =>
+    seriesName(s, i, used),
+  );
+  const selected: Record<string, boolean> = {};
+  currentNames.forEach((name) => {
+    selected[name] = previous[name] !== false;
+  });
+  visibleNames = selected;
+  const chartSeries: any[] = [];
+  props.series.forEach((s: any, i: number) => {
+    const solid: any[] = [];
+    const bad: any[] = [];
+    (s.data ?? []).forEach((d: any) => {
+      const numeric = d.value !== null && d.value !== undefined;
+      const mapped = numeric
+        ? props.segmented
+          ? mapValue(d.value, segments.value)
+          : d.value
+        : null;
+      const row = [
+        d.ts,
+        mapped,
+        d.ts,
+        d.value,
+        d.quality,
+        s.unit,
+        s.point_name,
+        s.point_id,
+      ];
+      if (d.quality === "bad") {
+        solid.push([
+          d.ts,
+          null,
+          d.ts,
+          null,
+          d.quality,
+          s.unit,
+          s.point_name,
+          s.point_id,
+        ]);
+        bad.push([
+          d.ts,
+          numeric ? mapped : null,
+          d.ts,
+          d.value,
+          d.quality,
+          s.unit,
+          s.point_name,
+          s.point_id,
+        ]);
+      } else {
+        solid.push(row);
+        bad.push([
+          d.ts,
+          null,
+          d.ts,
+          null,
+          d.quality,
+          s.unit,
+          s.point_name,
+          s.point_id,
+        ]);
+      }
+    });
+    const color = colors[i % colors.length];
+    chartSeries.push(
+      {
+        id: `${s.point_id}-good`,
+        name: currentNames[i],
+        type: "line",
+        showSymbol: false,
+        connectNulls: false,
+        data: solid,
+        lineStyle: { width: 1.8, color },
+        itemStyle: { color },
+        emphasis: { focus: "series" },
+      },
+      {
+        id: `${s.point_id}-bad`,
+        name: currentNames[i],
+        type: "line",
+        showSymbol: true,
+        symbolSize: 5,
+        connectNulls: false,
+        data: bad,
+        lineStyle: { width: 1.8, type: "dashed", color },
+        itemStyle: { color },
+        emphasis: { focus: "series" },
+      },
+    );
+  });
+  chart.setOption(
+    {
+      animation: true,
+      animationDuration: 260,
+      animationDurationUpdate: 260,
+      animationEasingUpdate: "cubicOut",
       color: colors,
-      grid: { left: 58, right: 26, top: 58, bottom: 46 },
-      legend: { top: 12, textStyle: { color: "#a9bbc0" } },
+      grid: {
+        left: 62,
+        right: 28,
+        top: currentNames.length ? 58 : 30,
+        bottom: 52,
+      },
+      graphic: [],
+      legend: {
+        show: currentNames.length > 0,
+        data: currentNames,
+        selected,
+        top: 12,
+        textStyle: { color: "#a9bbc0" },
+        itemWidth: 18,
+        itemHeight: 8,
+      },
       tooltip: {
         trigger: "axis",
+        transitionDuration: 0.12,
         axisPointer: {
-          type: "line",
-          lineStyle: { color: "#dbeee8", type: "dashed" },
+          type: "none",
         },
         backgroundColor: "#07141af2",
         borderColor: "#35505a",
         textStyle: { color: "#dce9e5" },
         formatter: (params: any) => {
-          emit(
-            "cursor",
-            params.map((p: any) => ({
-              pointName: p.seriesName,
-              ts: p.data?.[2],
-              value: p.data?.[3],
-              quality: p.data?.[4],
-              unit: p.data?.[5],
-            })),
-          );
-          return params
+          const rows = Array.isArray(params) ? params : [params];
+          const axisValue = rows[0]?.axisValue;
+          const target =
+            lastCursorTime ?? timestamp(axisValue ?? rows[0]?.data?.[2]);
+          if (!Number.isFinite(target)) return "";
+          emitCursorAt(target);
+          return cursorRows(target)
             .map(
-              (p: any) =>
-                `${p.marker}${p.seriesName}<br/>${p.data?.[3] ?? "—"} ${p.data?.[5] ?? ""} · ${p.data?.[4]}`,
+              (row: any) =>
+                `${row.pointName}<br/>${displayValue(row.value) ?? "—"} ${row.unit ?? ""} · ${row.quality}`,
             )
-            .join("<br/>");
+            .join("<br/>\n");
         },
       },
       xAxis: {
         type: "time",
+        min: props.startTime,
+        max: props.endTime,
+        splitNumber: splitNumber(),
+        minInterval: range.value / 24,
+        maxInterval: range.value / 3,
         axisLine: { lineStyle: { color: "#35505a" } },
-        axisLabel: { color: "#718990" },
+        axisLabel: {
+          color: "#718990",
+          hideOverlap: true,
+          formatter: axisLabel,
+        },
         splitLine: { show: true, lineStyle: { color: "#142b33" } },
       },
       yAxis: {
         type: "value",
         min: props.segmented ? 0 : undefined,
         max: props.segmented ? 1 : undefined,
+        scale: !props.segmented,
         axisLabel: {
           color: "#789098",
           formatter: (v: number) =>
@@ -69,66 +409,43 @@ function render() {
         },
         splitLine: { lineStyle: { color: "#173039", type: "dashed" } },
       },
-      series: props.series.flatMap((s: any, i: number) => {
-        const solid: any[] = [];
-        const bad: any[] = [];
-        s.data.forEach((d: any) => {
-          const row = [
-            d.ts,
-            d.value === null
-              ? null
-              : props.segmented
-                ? mapValue(d.value, segments.value)
-                : d.value,
-            d.ts,
-            d.value,
-            d.quality,
-            s.unit,
-          ];
-          (d.quality === "bad" && d.value !== null ? bad : solid).push(row);
-        });
-        return [
-          {
-            name: `${s.point_name}${s.unit ? ` (${s.unit})` : ""}`,
-            type: "line",
-            showSymbol: false,
-            connectNulls: false,
-            data: solid,
-            lineStyle: { width: 1.6, color: colors[i % colors.length] },
-          },
-          {
-            name: `${s.point_name} · bad`,
-            type: "line",
-            showSymbol: true,
-            symbolSize: 5,
-            connectNulls: false,
-            data: bad,
-            lineStyle: { width: 1.4, type: "dashed", color: "#ff665c" },
-            itemStyle: { color: "#ff665c" },
-          },
-        ];
-      }),
+      series: chartSeries,
     },
     true,
   );
+  if (lastCursorTime !== null) scheduleVisualCursor(lastCursorTime);
 }
 onMounted(() => {
   chart = echarts.init(el.value!);
-  observer = new ResizeObserver(() => chart?.resize());
+  observer = new ResizeObserver(() => {
+    chart?.resize();
+    if (chart && lastCursorTime !== null) scheduleVisualCursor(lastCursorTime);
+  });
   observer.observe(el.value!);
+  chart.getZr().on("mousemove", handleMouseMove);
+  chart.on("legendselectchanged", handleLegendChange);
   render();
 });
-watch(() => [props.series, props.segmented], render, { deep: true });
+watch(
+  () => [props.series, props.segmented, props.startTime, props.endTime],
+  render,
+  { deep: true },
+);
 onBeforeUnmount(() => {
+  if (cursorFrame !== undefined) cancelAnimationFrame(cursorFrame);
   observer?.disconnect();
+  chart?.getZr().off("mousemove", handleMouseMove);
+  chart?.off("legendselectchanged", handleLegendChange);
   chart?.dispose();
 });
 </script>
+
 <template><div ref="el" class="history-chart" /></template>
+
 <style scoped>
 .history-chart {
-  height: 450px;
   width: 100%;
+  height: 520px;
   background:
     linear-gradient(#0a1a21aa, #07151baa),
     repeating-linear-gradient(0deg, transparent 0 31px, #122a321f 32px);

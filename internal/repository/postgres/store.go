@@ -67,7 +67,7 @@ func (s *Store) DeleteDevice(ctx context.Context, id uuid.UUID) error {
 	if tag.RowsAffected() == 0 {
 		return pgx.ErrNoRows
 	}
-	for _, q := range []string{`UPDATE collection_points SET deleted=TRUE,enabled=FALSE,updated_at=NOW() WHERE device_id=$1 AND deleted=FALSE`, `UPDATE write_points SET deleted=TRUE,enabled=FALSE,write_enabled=FALSE,updated_at=NOW() WHERE device_id=$1 AND deleted=FALSE`} {
+	for _, q := range []string{`UPDATE collection_points SET deleted=TRUE,enabled=FALSE,updated_at=NOW() WHERE device_id=$1 AND deleted=FALSE`, `UPDATE write_points SET deleted=TRUE,write_enabled=FALSE,updated_at=NOW() WHERE device_id=$1 AND deleted=FALSE`} {
 		if _, e = tx.Exec(ctx, q, id); e != nil {
 			return e
 		}
@@ -76,25 +76,37 @@ func (s *Store) DeleteDevice(ctx context.Context, id uuid.UUID) error {
 }
 
 type PointRow struct {
-	ID                uuid.UUID  `json:"id"`
-	Name              string     `json:"name"`
-	GroupName         string     `json:"group_name"`
-	DeviceID          uuid.UUID  `json:"device_id"`
-	DeviceName        string     `json:"device_name"`
-	ProtocolType      string     `json:"protocol_type"`
-	Address           string     `json:"address"`
-	DataType          string     `json:"data_type"`
-	Unit              *string    `json:"unit"`
-	Enabled           bool       `json:"enabled"`
-	CollectInterval   int        `json:"collect_interval,omitempty"`
-	StoreHistory      bool       `json:"store_history,omitempty"`
-	HistoryInterval   int        `json:"history_interval,omitempty"`
-	HistoryStartedAt  *time.Time `json:"history_started_at,omitempty"`
-	WriteEnabled      bool       `json:"write_enabled,omitempty"`
-	ReadbackTolerance float64    `json:"readback_tolerance,omitempty"`
-	LatestValue       any        `json:"latest_value"`
-	CreatedAt         time.Time  `json:"created_at"`
-	UpdatedAt         time.Time  `json:"updated_at"`
+	ID               uuid.UUID  `json:"id"`
+	Name             string     `json:"name"`
+	GroupName        string     `json:"group_name"`
+	DeviceID         uuid.UUID  `json:"device_id"`
+	DeviceName       string     `json:"device_name"`
+	ProtocolType     string     `json:"protocol_type"`
+	Address          string     `json:"address"`
+	DataType         string     `json:"data_type"`
+	Unit             *string    `json:"unit"`
+	Enabled          bool       `json:"enabled"`
+	CollectInterval  int        `json:"collect_interval,omitempty"`
+	StoreHistory     bool       `json:"store_history,omitempty"`
+	HistoryInterval  int        `json:"history_interval,omitempty"`
+	HistoryStartedAt *time.Time `json:"history_started_at,omitempty"`
+	WriteEnabled     bool       `json:"write_enabled,omitempty"`
+	ReadbackValue    any        `json:"readback_value"`
+	LatestValue      any        `json:"latest_value"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+	PointKind        string     `json:"-"`
+}
+
+func (p PointRow) MarshalJSON() ([]byte, error) {
+	type alias PointRow
+	if p.PointKind == "write" {
+		return json.Marshal(struct {
+			alias
+			Enabled any `json:"enabled,omitempty"`
+		}{alias: alias(p)})
+	}
+	return json.Marshal(alias(p))
 }
 
 func (s *Store) GetPoint(ctx context.Context, kind string, id uuid.UUID) (PointRow, error) {
@@ -114,29 +126,26 @@ func (s *Store) SavePoint(ctx context.Context, kind string, p *PointRow) error {
 		if p.ID == uuid.Nil {
 			return s.DB.QueryRow(ctx, `INSERT INTO collection_points(name,group_name,device_id,enabled,address,data_type,unit,collect_interval,store_history,history_interval) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id,created_at,updated_at`, p.Name, p.GroupName, p.DeviceID, p.Enabled, p.Address, p.DataType, p.Unit, p.CollectInterval, p.StoreHistory, p.HistoryInterval).Scan(&p.ID, &p.CreatedAt, &p.UpdatedAt)
 		}
-		tag, e := s.DB.Exec(ctx, `UPDATE collection_points SET name=$2,group_name=$3,device_id=$4,enabled=$5,address=$6,data_type=$7,unit=$8,collect_interval=$9,store_history=$10,history_interval=$11,updated_at=NOW() WHERE id=$1 AND deleted=FALSE AND (history_started_at IS NULL OR (device_id=$4 AND data_type=$7))`, p.ID, p.Name, p.GroupName, p.DeviceID, p.Enabled, p.Address, p.DataType, p.Unit, p.CollectInterval, p.StoreHistory, p.HistoryInterval)
+		tag, e := s.DB.Exec(ctx, `UPDATE collection_points SET name=$2,group_name=$3,device_id=$4,enabled=$5,address=$6,data_type=$7,unit=$8,collect_interval=$9,store_history=$10,history_interval=$11,updated_at=NOW() WHERE id=$1 AND deleted=FALSE`, p.ID, p.Name, p.GroupName, p.DeviceID, p.Enabled, p.Address, p.DataType, p.Unit, p.CollectInterval, p.StoreHistory, p.HistoryInterval)
 		if e == nil && tag.RowsAffected() == 0 {
 			return pgx.ErrNoRows
 		}
 		return e
 	}
 	if p.ID == uuid.Nil {
-		return s.DB.QueryRow(ctx, `INSERT INTO write_points(name,group_name,device_id,enabled,write_enabled,address,data_type,unit,readback_tolerance) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id,created_at,updated_at`, p.Name, p.GroupName, p.DeviceID, p.Enabled, p.WriteEnabled, p.Address, p.DataType, p.Unit, p.ReadbackTolerance).Scan(&p.ID, &p.CreatedAt, &p.UpdatedAt)
+		return s.DB.QueryRow(ctx, `INSERT INTO write_points(name,group_name,device_id,write_enabled,address,data_type,unit) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id,created_at,updated_at`, p.Name, p.GroupName, p.DeviceID, p.WriteEnabled, p.Address, p.DataType, p.Unit).Scan(&p.ID, &p.CreatedAt, &p.UpdatedAt)
 	}
-	tag, e := s.DB.Exec(ctx, `UPDATE write_points SET name=$2,group_name=$3,device_id=$4,enabled=$5,write_enabled=$6,address=$7,data_type=$8,unit=$9,readback_tolerance=$10,updated_at=NOW() WHERE id=$1 AND deleted=FALSE`, p.ID, p.Name, p.GroupName, p.DeviceID, p.Enabled, p.WriteEnabled, p.Address, p.DataType, p.Unit, p.ReadbackTolerance)
+	tag, e := s.DB.Exec(ctx, `UPDATE write_points SET name=$2,group_name=$3,device_id=$4,write_enabled=$5,address=$6,data_type=$7,unit=$8,updated_at=NOW() WHERE id=$1 AND deleted=FALSE`, p.ID, p.Name, p.GroupName, p.DeviceID, p.WriteEnabled, p.Address, p.DataType, p.Unit)
 	if e == nil && tag.RowsAffected() == 0 {
 		return pgx.ErrNoRows
 	}
 	return e
 }
 func (s *Store) DeletePoint(ctx context.Context, kind string, id uuid.UUID) error {
-	table := "collection_points"
-	extra := ""
+	q := `UPDATE collection_points SET deleted=TRUE,enabled=FALSE,updated_at=NOW() WHERE id=$1 AND deleted=FALSE`
 	if kind == "write" {
-		table = "write_points"
-		extra = ",write_enabled=FALSE"
+		q = `UPDATE write_points SET deleted=TRUE,write_enabled=FALSE,updated_at=NOW() WHERE id=$1 AND deleted=FALSE`
 	}
-	q := fmt.Sprintf(`UPDATE %s SET deleted=TRUE,enabled=FALSE%s,updated_at=NOW() WHERE id=$1 AND deleted=FALSE`, table, extra)
 	tag, e := s.DB.Exec(ctx, q, id)
 	if e == nil && tag.RowsAffected() == 0 {
 		return pgx.ErrNoRows
@@ -166,7 +175,10 @@ func (s *Store) FindPointByName(ctx context.Context, kind, name string) (PointRo
 	return PointRow{}, pgx.ErrNoRows
 }
 func (s *Store) Groups(ctx context.Context) ([]map[string]any, error) {
-	rows, e := s.DB.Query(ctx, `SELECT g.name,COUNT(p.id) FROM collection_groups g LEFT JOIN collection_points p ON p.group_name=g.name AND p.deleted=FALSE GROUP BY g.name ORDER BY g.name`)
+	rows, e := s.DB.Query(ctx, `SELECT g.name,
+		(SELECT COUNT(*) FROM collection_points cp WHERE cp.group_name=g.name AND cp.deleted=FALSE),
+		(SELECT COUNT(*) FROM write_points wp WHERE wp.group_name=g.name AND wp.deleted=FALSE)
+		FROM collection_groups g ORDER BY g.name`)
 	if e != nil {
 		return nil, e
 	}
@@ -174,11 +186,16 @@ func (s *Store) Groups(ctx context.Context) ([]map[string]any, error) {
 	out := []map[string]any{}
 	for rows.Next() {
 		var name string
-		var count int
-		if e = rows.Scan(&name, &count); e != nil {
+		var collectionCount, writeCount int
+		if e = rows.Scan(&name, &collectionCount, &writeCount); e != nil {
 			return nil, e
 		}
-		out = append(out, map[string]any{"name": name, "count": count})
+		out = append(out, map[string]any{
+			"name":             name,
+			"count":            collectionCount,
+			"collection_count": collectionCount,
+			"write_count":      writeCount,
+		})
 	}
 	return out, rows.Err()
 }
@@ -198,6 +215,9 @@ func (s *Store) UpdateGroup(ctx context.Context, oldName, newName string) error 
 	if _, e = tx.Exec(ctx, `UPDATE collection_points SET group_name=$2,updated_at=NOW() WHERE group_name=$1 AND deleted=FALSE`, oldName, newName); e != nil {
 		return e
 	}
+	if _, e = tx.Exec(ctx, `UPDATE write_points SET group_name=$2,updated_at=NOW() WHERE group_name=$1 AND deleted=FALSE`, oldName, newName); e != nil {
+		return e
+	}
 	if _, e = tx.Exec(ctx, `DELETE FROM collection_groups WHERE name=$1`, oldName); e != nil {
 		return e
 	}
@@ -212,7 +232,13 @@ func (s *Store) DeleteGroup(ctx context.Context, name string) error {
 		return e
 	}
 	defer tx.Rollback(ctx)
-	if _, e = tx.Exec(ctx, `UPDATE collection_points SET deleted=TRUE,enabled=FALSE,updated_at=NOW() WHERE group_name=$1 AND deleted=FALSE`, name); e != nil {
+	if _, e = tx.Exec(ctx, `INSERT INTO collection_groups(name) VALUES('default') ON CONFLICT(name) DO NOTHING`); e != nil {
+		return e
+	}
+	if _, e = tx.Exec(ctx, `UPDATE collection_points SET group_name='default',updated_at=NOW() WHERE group_name=$1 AND deleted=FALSE`, name); e != nil {
+		return e
+	}
+	if _, e = tx.Exec(ctx, `UPDATE write_points SET group_name='default',updated_at=NOW() WHERE group_name=$1 AND deleted=FALSE`, name); e != nil {
 		return e
 	}
 	tag, e := tx.Exec(ctx, `DELETE FROM collection_groups WHERE name=$1`, name)
@@ -236,16 +262,19 @@ func (s *Store) SetRetention(ctx context.Context, days int) error {
 
 func (s *Store) ListPoints(ctx context.Context, kind, keyword string, archived bool) ([]PointRow, error) {
 	table := "collection_points"
-	cols := `p.collect_interval,p.store_history,p.history_interval,p.history_started_at,FALSE,0`
+	enabledColumn := "p.enabled"
+	cols := `p.collect_interval,p.store_history,p.history_interval,p.history_started_at,FALSE,NULL::text`
 	if kind == "write" {
 		table = "write_points"
-		cols = `NULL::double precision,NULL::double precision,0,FALSE,0,NULL::timestamptz,p.write_enabled,p.readback_tolerance`
+		enabledColumn = "FALSE"
+		cols = `0::int,FALSE::bool,0,NULL::timestamptz,p.write_enabled,
+			(SELECT wl.readback_value FROM write_logs wl WHERE wl.point_id=p.id ORDER BY wl.created_at DESC LIMIT 1)`
 	}
 	deleted := "p.deleted=FALSE AND d.deleted=FALSE"
 	if archived {
 		deleted = "TRUE"
 	}
-	q := fmt.Sprintf(`SELECT p.id,p.name,p.group_name,p.device_id,d.name,d.protocol_type,p.address,p.data_type,p.unit,p.enabled,%s,p.created_at,p.updated_at FROM %s p JOIN devices d ON d.id=p.device_id WHERE %s AND ($1='' OR p.name ILIKE '%%'||$1||'%%' OR p.group_name ILIKE '%%'||$1||'%%') ORDER BY p.group_name,p.name LIMIT 1000`, cols, table, deleted)
+	q := fmt.Sprintf(`SELECT p.id,p.name,p.group_name,p.device_id,d.name,d.protocol_type,p.address,p.data_type,p.unit,%s,%s,p.created_at,p.updated_at FROM %s p JOIN devices d ON d.id=p.device_id WHERE %s AND ($1='' OR p.name ILIKE '%%'||$1||'%%' OR p.group_name ILIKE '%%'||$1||'%%') ORDER BY p.group_name,p.name LIMIT 1000`, enabledColumn, cols, table, deleted)
 	rows, e := s.DB.Query(ctx, q, keyword)
 	if e != nil {
 		return nil, e
@@ -253,11 +282,57 @@ func (s *Store) ListPoints(ctx context.Context, kind, keyword string, archived b
 	defer rows.Close()
 	var out []PointRow
 	for rows.Next() {
-		var p PointRow
-		if e = rows.Scan(&p.ID, &p.Name, &p.GroupName, &p.DeviceID, &p.DeviceName, &p.ProtocolType, &p.Address, &p.DataType, &p.Unit, &p.Enabled, &p.CollectInterval, &p.StoreHistory, &p.HistoryInterval, &p.HistoryStartedAt, &p.WriteEnabled, &p.ReadbackTolerance, &p.CreatedAt, &p.UpdatedAt); e != nil {
+		p := PointRow{PointKind: kind}
+		var rawReadback *string
+		if e = rows.Scan(&p.ID, &p.Name, &p.GroupName, &p.DeviceID, &p.DeviceName, &p.ProtocolType, &p.Address, &p.DataType, &p.Unit, &p.Enabled, &p.CollectInterval, &p.StoreHistory, &p.HistoryInterval, &p.HistoryStartedAt, &p.WriteEnabled, &rawReadback, &p.CreatedAt, &p.UpdatedAt); e != nil {
 			return nil, e
 		}
+		p.ReadbackValue = parseOptional(p.DataType, rawReadback)
 		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// ListDeletedCollectionPointIDs returns collection points whose realtime
+// metadata no longer exists. The history cleanup flow uses this list to avoid
+// touching disabled points that may be re-enabled later.
+func (s *Store) ListDeletedCollectionPointIDs(ctx context.Context) ([]uuid.UUID, error) {
+	rows, e := s.DB.Query(ctx, `SELECT p.id
+		FROM collection_points p
+		LEFT JOIN devices d ON d.id=p.device_id
+		WHERE p.deleted=TRUE OR d.deleted=TRUE
+		ORDER BY p.id`)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	var out []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if e = rows.Scan(&id); e != nil {
+			return nil, e
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// ListDeviceActivity returns the current realtime availability of every
+// device, including logically deleted rows used by the history tree.
+func (s *Store) ListDeviceActivity(ctx context.Context) (map[uuid.UUID]bool, error) {
+	rows, e := s.DB.Query(ctx, `SELECT id,enabled,deleted FROM devices`)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	out := make(map[uuid.UUID]bool)
+	for rows.Next() {
+		var id uuid.UUID
+		var enabled, deleted bool
+		if e = rows.Scan(&id, &enabled, &deleted); e != nil {
+			return nil, e
+		}
+		out[id] = enabled && !deleted
 	}
 	return out, rows.Err()
 }
