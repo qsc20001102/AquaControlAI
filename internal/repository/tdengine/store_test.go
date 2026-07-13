@@ -3,6 +3,7 @@ package tdengine
 import (
 	"github.com/google/uuid"
 	"testing"
+	"time"
 )
 
 func TestTableName(t *testing.T) {
@@ -14,5 +15,12 @@ func TestTableName(t *testing.T) {
 func TestSQLStringEscapesQuote(t *testing.T) {
 	if got := sqlString("a'b"); got != "'a''b'" {
 		t.Fatalf("unexpected literal: %s", got)
+	}
+}
+
+func TestTDTimeLiteralUsesShanghaiOffset(t *testing.T) {
+	ts := time.Date(2026, 7, 13, 2, 10, 10, 123000000, time.UTC)
+	if got := tdTimeLiteral(ts); got != "2026-07-13T10:10:10.123+08:00" {
+		t.Fatalf("unexpected TDengine timestamp literal: %s", got)
 	}
 }

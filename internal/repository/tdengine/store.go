@@ -28,11 +28,18 @@ func (s *Store) Insert(ctx context.Context, p pg.PointRow, d model.Device, value
 	if reason != nil {
 		reasonLiteral = sqlString(*reason)
 	}
-	q := fmt.Sprintf("INSERT INTO `%s`.`%s` USING `%s`.`collection_data` TAGS(%s,%s,%s) VALUES(%s,%s,%d,%s,%s,%s)", s.Database, TableName(p.ID), s.Database, sqlString(d.ID.String()), sqlString(d.Name), sqlString(p.DataType), sqlString(ts.Format("2006-01-02 15:04:05.000")), valueLiteral, quality, reasonLiteral, sqlString(p.ID.String()), sqlString(p.Name))
+	q := fmt.Sprintf("INSERT INTO `%s`.`%s` USING `%s`.`collection_data` TAGS(%s,%s,%s) VALUES(%s,%s,%d,%s,%s,%s)", s.Database, TableName(p.ID), s.Database, sqlString(d.ID.String()), sqlString(d.Name), sqlString(p.DataType), sqlString(tdTimeLiteral(ts)), valueLiteral, quality, reasonLiteral, sqlString(p.ID.String()), sqlString(p.Name))
 	_, e := s.DB.ExecContext(ctx, q)
 	return e
 }
 func sqlString(v string) string { return "'" + strings.ReplaceAll(v, "'", "''") + "'" }
+
+var shanghai = time.FixedZone("Asia/Shanghai", 8*60*60)
+
+func tdTimeLiteral(t time.Time) string {
+	return t.In(shanghai).Format("2006-01-02T15:04:05.000-07:00")
+}
+
 func (s *Store) SetRetention(ctx context.Context, days int) error {
 	if days < 1 || days > 730 {
 		return fmt.Errorf("保留天数超出范围")
@@ -95,8 +102,7 @@ func (s *Store) DropTables(ctx context.Context, ids []uuid.UUID) (int, error) {
 	return removed, nil
 }
 func (s *Store) Query(ctx context.Context, id uuid.UUID, start, end time.Time) ([]Sample, error) {
-	shanghai := time.FixedZone("Asia/Shanghai", 8*60*60)
-	q := fmt.Sprintf("SELECT ts,`value`,quality,quality_reason FROM `%s`.`%s` WHERE ts >= %s AND ts <= %s ORDER BY ts", s.Database, TableName(id), sqlString(start.In(shanghai).Format("2006-01-02 15:04:05.000")), sqlString(end.In(shanghai).Format("2006-01-02 15:04:05.000")))
+	q := fmt.Sprintf("SELECT ts,`value`,quality,quality_reason FROM `%s`.`%s` WHERE ts >= %s AND ts <= %s ORDER BY ts", s.Database, TableName(id), sqlString(tdTimeLiteral(start)), sqlString(tdTimeLiteral(end)))
 	rows, e := s.DB.QueryContext(ctx, q)
 	if e != nil {
 		return nil, e
@@ -109,10 +115,7 @@ func (s *Store) Query(ctx context.Context, id uuid.UUID, start, end time.Time) (
 		if e = rows.Scan(&x.TS, &x.Value, &quality, &x.QualityReason); e != nil {
 			return nil, e
 		}
-		// The REST driver returns TDengine's local wall-clock timestamp with a
-		// UTC location. Rebuild it in Asia/Shanghai instead of converting the
-		// instant, otherwise an eight-hour offset would be applied twice.
-		x.TS = time.Date(x.TS.Year(), x.TS.Month(), x.TS.Day(), x.TS.Hour(), x.TS.Minute(), x.TS.Second(), x.TS.Nanosecond(), shanghai)
+		x.TS = x.TS.In(shanghai)
 		if quality == 0 {
 			x.Quality = "good"
 		} else {

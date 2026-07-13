@@ -21,14 +21,15 @@ type History struct {
 	}
 }
 type Series struct {
-	PointID     uuid.UUID   `json:"point_id"`
-	PointName   string      `json:"point_name"`
-	DataType    string      `json:"data_type"`
-	Unit        *string     `json:"unit"`
-	Sampled     bool        `json:"sampled"`
-	RawCount    int         `json:"raw_count"`
-	SampleCount int         `json:"sample_count"`
-	Data        []td.Sample `json:"data"`
+	PointID         uuid.UUID   `json:"point_id"`
+	PointName       string      `json:"point_name"`
+	DataType        string      `json:"data_type"`
+	Unit            *string     `json:"unit"`
+	HistoryInterval int         `json:"history_interval"`
+	Sampled         bool        `json:"sampled"`
+	RawCount        int         `json:"raw_count"`
+	SampleCount     int         `json:"sample_count"`
+	Data            []td.Sample `json:"data"`
 }
 
 func (h *History) Tree(ctx context.Context) ([]map[string]any, error) {
@@ -108,13 +109,35 @@ func (h *History) Query(ctx context.Context, ids []uuid.UUID, start, end time.Ti
 			return nil, e
 		}
 		raw := len(data)
-		if raw > max {
+		data = withHistoryGaps(data, time.Duration(p.HistoryInterval)*time.Minute)
+		sampled := len(data) > max
+		if sampled {
 			data = minMax(data, max)
 		}
-		out = append(out, Series{id, p.Name, p.DataType, p.Unit, raw > len(data), raw, len(data), data})
+		out = append(out, Series{id, p.Name, p.DataType, p.Unit, p.HistoryInterval, sampled, raw, len(data), data})
 	}
 	return out, nil
 }
+
+func withHistoryGaps(data []td.Sample, interval time.Duration) []td.Sample {
+	if len(data) < 2 || interval <= 0 {
+		return data
+	}
+	threshold := interval * 3
+	out := make([]td.Sample, 0, len(data))
+	out = append(out, data[0])
+	for i := 1; i < len(data); i++ {
+		prev := data[i-1]
+		current := data[i]
+		gap := current.TS.Sub(prev.TS)
+		if gap > threshold {
+			out = append(out, td.Sample{TS: prev.TS.Add(gap / 2), Quality: "none"})
+		}
+		out = append(out, current)
+	}
+	return out
+}
+
 func minMax(data []td.Sample, max int) []td.Sample {
 	if len(data) <= max {
 		return data

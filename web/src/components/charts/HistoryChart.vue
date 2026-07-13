@@ -140,6 +140,17 @@ function cursorRow(s: any, target: number) {
     }
   }
   if (before && after && before.time !== after.time) {
+    const blockedBetween = points.some(
+      (point: any) =>
+        point.time > before.time &&
+        point.time < after.time &&
+        (point.value === null ||
+          point.value === undefined ||
+          point.quality !== "good"),
+    );
+    if (blockedBetween) {
+      return base;
+    }
     const ratio = (target - before.time) / (after.time - before.time);
     const badBetween = points.some(
       (point: any) =>

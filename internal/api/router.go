@@ -711,19 +711,17 @@ func (h *Handler) exportHistory(c *gin.Context) {
 			n += "_" + col.PointID.String()[:8]
 		}
 		used[n] = true
-		head = append(head, n, n+"_质量")
+		head = append(head, n)
 	}
 	w.Write(head)
 	for i, t := range data.TimeColumn {
 		row := []string{t.Format("2006-01-02 15:04:05")}
 		for _, col := range data.Columns {
 			x := col.Data[i]
-			if x.Quality == "good" && x.Value != nil {
-				row = append(row, strconv.FormatFloat(*x.Value, 'f', -1, 64), "good")
-			} else if x.Quality == "bad" {
-				row = append(row, "—", "bad")
+			if x.Value != nil {
+				row = append(row, strconv.FormatFloat(*x.Value, 'f', -1, 64))
 			} else {
-				row = append(row, "—", "—")
+				row = append(row, "")
 			}
 		}
 		w.Write(row)
