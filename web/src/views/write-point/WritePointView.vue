@@ -251,13 +251,15 @@ onMounted(async () => {
 
         <div class="toolbar" style="margin-bottom: 12px">
           <button
-            :class="['btn', tab === 'points' && 'btn-primary']"
+            v-if="tab === 'logs'"
+            class="btn"
             @click="tab = 'points'"
           >
             写入点
           </button>
           <button
-            :class="['btn', tab === 'logs' && 'btn-primary']"
+            v-if="tab === 'points'"
+            class="btn"
             @click="tab = 'logs'"
           >
             操作日志
@@ -380,7 +382,6 @@ onMounted(async () => {
               v-model="form.address"
               class="input"
               required
-              placeholder="MD540"
             />
           </label>
           <label class="field">

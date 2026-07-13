@@ -80,7 +80,9 @@ CREATE STABLE IF NOT EXISTS collection_data (
 );
 ```
 
-`value` 可为 NULL。读取失败或断线时使用 `quality=bad`、`value=NULL`；超出有效范围时保留实际值并使用 `quality=bad`。
+`value` 可为 NULL。读取失败或断线时使用 `quality=bad`、`value=NULL`；采集点已移除有效范围配置，协议读取和解析成功即写入 `quality=good`。
+
+TDengine 写入和查询时间字面量统一使用带上海时区偏移的 RFC3339 样式，例如 `2026-07-13T10:05:41.002+08:00`。读回时间按真实 instant 转换为 `Asia/Shanghai` 输出，避免无时区字符串在 REST 链路中产生 8 小时偏移。
 
 ### 2.2 预留数据来源：非采集点位（内部数据）
 
@@ -234,18 +236,15 @@ ALTER DATABASE ${TDENGINE_DATABASE} KEEP 730;
 | POST | /api/v1/history/query | 查询历史数据（曲线模式） |
 | POST | /api/v1/history/query-table | 查询历史数据（表格模式） |
 | POST | /api/v1/history/export | 导出历史数据为CSV |
+| POST | /api/v1/history/archive/cleanup | 清理已逻辑删除点位的归档历史子表 |
 
 ### 5.2 接口详细定义
 
 #### 5.2.1 GET /api/v1/history/tree — 获取历史点位树
 
-Query parameters：
+当前接口不需要查询参数，默认包含活跃点位和仍有历史数据的归档点位。
 
-| 参数 | 类型 | 必填 | 默认 | 说明 |
-|---|---|---|---|---|
-| include_archived | bool | 否 | true | 是否包含仍有历史数据的归档点位 |
-
-历史模块调用 `ListHistoryPointMetadata(IncludeArchived=true)`，批量检查 TDengine 历史存在性并构建树；不得直接查询数据管理 PostgreSQL 表。
+历史模块调用 `ListHistoryPointMetadata(IncludeArchived=true)` 等价能力，批量检查 TDengine 历史存在性并构建树；不得直接查询数据管理模块以外的私有 Repository。当前实现通过进程内 PostgreSQL Store 读取包括逻辑删除记录在内的元数据。
 
 Response (200)：
 
@@ -272,6 +271,7 @@ Response (200)：
                         "group_name": "曝气池",
                         "lifecycle_status": "active",
                         "has_history_data": true,
+                        "can_cleanup": false,
                         "latest_value": {
                             "value": 2.35,
                             "quality": "good",
@@ -291,6 +291,7 @@ Response (200)：
                         "group_name": "曝气池",
                         "lifecycle_status": "archived",
                         "has_history_data": true,
+                        "can_cleanup": true,
                         "latest_value": null
                     }
                 ]
@@ -331,8 +332,9 @@ Request body：
 1. 调用 `GetHistoryPointMetadata(..., includeArchived=true)` 校验并批量取得当前名称、单位和类型；
 2. 由 UUID 派生并白名单校验 `p_<uuid32>` 子表名；
 3. 查询 `ts, value, quality, quality_reason`；
-4. 原始点数超过 `max_samples` 时执行自适应 min-max 降采样，保留首尾、极值、质量变化和 gap 边界；
-5. 返回每条序列的采样统计。
+4. 按点位 `history_interval` 判断断档，相邻样本间隔超过 `3 × history_interval` 时插入 `value=null, quality=none` 的断点，避免曲线跨长时间停采区间连线；
+5. 原始点数超过 `max_samples` 时执行自适应 min-max 降采样，保留首尾、极值、质量变化和 gap 边界；
+6. 返回每条序列的采样统计。
 
 Response (200)：
 
@@ -349,12 +351,13 @@ Response (200)：
                 "unit": "mg/L",
                 "sampled": false,
                 "raw_count": 5,
-                "sample_count": 5,
+                "sample_count": 6,
                 "data": [
                     {"ts":"2026-07-09T00:00:01+08:00","value":2.35,"quality":"good","quality_reason":null},
                     {"ts":"2026-07-09T00:00:02+08:00","value":2.36,"quality":"good","quality_reason":null},
-                    {"ts":"2026-07-09T00:00:05+08:00","value":2.38,"quality":"bad","quality_reason":"out_of_range"},
+                    {"ts":"2026-07-09T00:00:05+08:00","value":2.38,"quality":"good","quality_reason":null},
                     {"ts":"2026-07-09T00:00:08+08:00","value":null,"quality":"bad","quality_reason":"timeout"},
+                    {"ts":"2026-07-09T00:00:09+08:00","value":null,"quality":"none","quality_reason":null},
                     {"ts":"2026-07-09T00:00:10+08:00","value":2.40,"quality":"good","quality_reason":null}
                 ]
             }
@@ -434,13 +437,37 @@ Response (200)：
 报表 CSV 允许本地化动态标题：
 
 ```csv
-时间,曝气池DO_01[mg/L],曝气池DO_01[mg/L]_质量,曝气池温度[℃],曝气池温度[℃]_质量
-2026-07-09 00:00:00,2.35,good,25.1,good
-2026-07-09 00:10:00,2.40,good,25.0,good
-2026-07-09 00:20:00,—,—,25.3,good
+时间,曝气池DO_01[mg/L],曝气池温度[℃]
+2026-07-09 00:00:00,2.35,25.1
+2026-07-09 00:10:00,2.40,25.0
+2026-07-09 00:20:00,,25.3
 ```
 
-重复点位名称追加 UUID 前8位。bad 时数值列显示 `—`、质量列显示 `bad`；none 时两列均显示 `—`。
+重复点位名称追加 UUID 前8位。CSV 每个测点只导出一列实际值，不额外导出质量列；`bad`、`none` 或空值时该值列留空。
+
+#### 5.2.5 POST /api/v1/history/archive/cleanup — 清理已删除点位归档数据
+
+该接口仅清理采集点已逻辑删除，或所属设备已逻辑删除的历史子表。禁用但仍可恢复的点位、`store_history=false` 但配置仍存在的点位不纳入清理。
+
+Request body：无。
+
+Response (200)：
+
+```json
+{
+    "code": 0,
+    "message": "success",
+    "data": {
+        "deleted_points": 13
+    }
+}
+```
+
+执行规则：
+
+- 由 PostgreSQL 枚举已逻辑删除点位 UUID；
+- TDengine 子表名仍只能由 UUID 派生为 `p_<uuid32>`；
+- 删除使用 `DROP TABLE IF EXISTS`，清理不可逆，前端必须二次确认。
 
 ### 5.3 错误码
 
@@ -715,10 +742,11 @@ ECharts 使用封装在 `src/components/charts/` 的纯函数生成映射和 opt
 | H009 | 模式切换 | 保持点位勾选状态和时间范围不变 |
 | H010 | CSV导出 | 报表型动态标题，安全服务端文件名，最多50,000行 |
 | H011 | 查询间隔建议 | 小于最大history_interval时仅提示，不禁止；查询最大31天 |
-| H012 | 曲线采样 | 每序列默认最多2000点，超限执行自适应min-max降采样 |
+| H012 | 曲线采样 | 每序列默认最多2000点，先按3倍history_interval插入断档点，再超限执行自适应min-max降采样 |
 | H013 | 缺失值协议 | 固定返回value=null、quality=none、matched_ts=null对象 |
+| H014 | 归档清理 | 仅清理已逻辑删除点位或已删除设备下点位的 TDengine 子表，禁用点位不清理 |
 
 ---
 
-> 本文档版本：v1.1
-> 最后更新：2026-07-11
+> 本文档版本：v1.2
+> 最后更新：2026-07-13

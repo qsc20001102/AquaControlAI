@@ -5,7 +5,19 @@ import HistoryChart from "@/components/charts/HistoryChart.vue";
 import { historyApi, systemApi } from "@/api/platform";
 
 const groups = ref<any[]>([]);
-const selected = ref<string[]>([]);
+const historySelectionKey = "aqua.history.selectedPointIds";
+function readStoredSelection() {
+  try {
+    const raw = sessionStorage.getItem(historySelectionKey);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed)
+      ? parsed.filter((id) => typeof id === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+const selected = ref<string[]>(readStoredSelection());
 const expandedGroups = ref<Set<string>>(new Set());
 const mode = ref<"curve" | "table">("curve");
 const range = ref("1h");
@@ -17,6 +29,7 @@ const cursor = ref<any[]>([]);
 const retention = ref(365);
 const loading = ref(false);
 const treeLoading = ref(false);
+const treeReady = ref(false);
 const cleaning = ref(false);
 const queryError = ref("");
 const cache = new Map<string, any>();
@@ -115,10 +128,7 @@ function syncTree(nextGroups: any[]) {
     .flatMap((g: any) => g.children ?? [])
     .filter((p: any) => p.type === "collection" && !p.disabled);
   const ids = new Set(points.map((p: any) => p.id));
-  const preserved = selected.value.filter((id) => ids.has(id));
-  selected.value = preserved.length
-    ? preserved
-    : points.slice(0, 2).map((p: any) => p.id);
+  selected.value = selected.value.filter((id) => ids.has(id));
   const open = new Set(
     nextGroups
       .filter((g: any) => g.children?.some((p: any) => p.type === "collection"))
@@ -139,6 +149,7 @@ async function loadTree() {
     groups.value = [];
     selected.value = [];
   } finally {
+    treeReady.value = true;
     treeLoading.value = false;
   }
 }
@@ -276,6 +287,7 @@ function tableValue(value: any) {
 
 watch(
   () => [
+    treeReady.value,
     selected.value.join(","),
     start.value.getTime(),
     end.value.getTime(),
@@ -283,10 +295,17 @@ watch(
     interval.value,
   ],
   () => {
+    if (!treeReady.value) return;
     if (queryTimer) clearTimeout(queryTimer);
     queryTimer = setTimeout(() => void query(), 180);
   },
   { immediate: true },
+);
+watch(
+  () => selected.value,
+  (value) => {
+    sessionStorage.setItem(historySelectionKey, JSON.stringify(value));
+  },
 );
 onMounted(async () => {
   try {
@@ -501,8 +520,7 @@ onBeforeUnmount(() => {
                     <td>{{ c.pointName }}</td>
                     <td>{{ formatDateTime(c.ts) }}</td>
                     <td :class="c.quality === 'bad' ? 'quality-bad' : ''">
-                      {{ c.interpolated ? "≈" : ""
-                      }}{{ formatCursorValue(c.value) ?? "—" }}
+                      {{ formatCursorValue(c.value) ?? "—" }}
                       {{ c.unit }}
                     </td>
                     <td>{{ c.quality ?? "—" }}</td>

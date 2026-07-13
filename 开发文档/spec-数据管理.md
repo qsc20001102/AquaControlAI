@@ -87,8 +87,8 @@ CREATE UNIQUE INDEX idx_devices_name ON devices(name) WHERE deleted = FALSE;
 
 | 协议类型标识 | 说明 | 当前状态 |
 |-------------|------|---------|
-| `S7` | 西门子S7协议 | 已支持 |
-| `MODBUS_TCP` | Modbus TCP协议 | 已支持 |
+| `S7` | 西门子S7协议 | 采集、写入和现场联调已支持 |
+| `MODBUS_TCP` | Modbus TCP协议 | 已支持运行时连接、采集和写入 |
 | （后续扩展） | 新增协议通过插件机制添加 | 待扩展 |
 
 #### 2.1.3 各协议 protocol_config 定义
@@ -143,6 +143,7 @@ CREATE UNIQUE INDEX idx_devices_name ON devices(name) WHERE deleted = FALSE;
 
 说明：
 - `connection_status` 是运行时状态，由采集引擎维护在内存中，**不存储到数据库**
+- `last_online_at`、`last_offline_at` 也是运行时内存字段，仅在状态实际变化时更新，用于设备列表展示最近在线/离线时间
 - 设备逻辑删除（deleted=true）时，在接口响应中表现为 `disabled`
 - 采集引擎未运行时，所有 enabled=true 的设备均返回 `disconnected`
 
@@ -237,9 +238,9 @@ PUT 使用完整替换语义，以下字段全部必填：
 ```
 
 - 校验规则与新增一致，额外要求 `enabled` 为布尔值。
-- 修改连接参数或协议配置后，Service 在事务提交后发布配置变更事件；采集引擎断开旧连接并使用新参数重连。
+- 修改连接参数或协议配置后，Service 保存成功即调用连接管理器使该设备旧连接失效；下一次采集或写入会按新参数重新建立连接。
 - `enabled=false` 时运行时状态立即进入 `disabled`；`enabled=true` 后先返回 `disconnected`，连接成功后变为 `connected`。
-- 配置变更正常情况下 1 秒内生效，5 秒全量校对保证最终一致。
+- 采集调度器每秒重新加载活动采集点，点位配置变更通常在下一个调度周期生效。
 
 **DELETE /api/v1/devices/{id}** — 逻辑删除
 
@@ -317,6 +318,8 @@ Response (200)：
                 "reconnect_interval": 10,
                 "protocol_config": { "rack": 0, "slot": 1 },
                 "connection_status": "connected",
+                "last_online_at": "2026-07-13T09:30:00+08:00",
+                "last_offline_at": null,
                 "created_at": "...",
                 "updated_at": "..."
             }
@@ -386,8 +389,6 @@ CREATE TABLE collection_points (
     address             VARCHAR(256) NOT NULL,
     data_type           VARCHAR(16) NOT NULL,  -- 'BOOL', 'INT', 'REAL'
     unit                VARCHAR(32),
-    valid_min           DOUBLE PRECISION,
-    valid_max           DOUBLE PRECISION,
 
     collect_interval    INTEGER NOT NULL DEFAULT 1 CHECK (collect_interval >= 1),
     store_history       BOOLEAN NOT NULL DEFAULT TRUE,
@@ -397,9 +398,7 @@ CREATE TABLE collection_points (
     created_at          TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     created_by          VARCHAR(64),
-    updated_by          VARCHAR(64),
-
-    CHECK (valid_min IS NULL OR valid_max IS NULL OR valid_min <= valid_max)
+    updated_by          VARCHAR(64)
 );
 
 CREATE UNIQUE INDEX idx_collection_points_name
@@ -410,9 +409,23 @@ CREATE INDEX idx_collection_points_group_name
     ON collection_points(group_name) WHERE deleted = FALSE;
 ```
 
-`history_started_at` 在点位首次准备写入 TDengine 前设置。一旦非空，`device_id` 和 `data_type` 不可修改；需要改变设备归属或数据类型时必须新建点位，防止同一历史子表混入不同语义的数据。
+有效最小值/最大值已从采集点配置中移除，采集质量不再执行业务有效范围判断；协议读写成功即为 `good`，失败才标记 `bad`。
 
-#### 3.1.1.1 历史模块只读元数据接口
+`history_started_at` 在点位首次准备写入 TDengine 前设置。当前实现允许编辑采集点的 `device_id` 和 `data_type`；历史子表中的 `device_name`、`point_name`、`data_type` 仍是写入时快照，历史页面展示以 PostgreSQL 当前元数据为准。若业务需要严格保留历史语义，后续应通过新建点位或迁移流程处理。
+
+#### 3.1.1.1 数据库表：collection_groups
+
+```sql
+CREATE TABLE collection_groups (
+    name       VARCHAR(64) PRIMARY KEY,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+);
+```
+
+`collection_groups` 是采集点和写入点共享的扁平分组字典。启动迁移会把历史 `group_name` 同步进该表，并确保 `default` 分组存在。
+
+#### 3.1.1.2 历史模块只读元数据接口
 
 设备与采集点配置由数据管理模块拥有。历史模块必须调用公开的进程内只读领域接口，不得直接查询 `devices`、`collection_points` 表或调用数据管理 Repository。
 
@@ -456,11 +469,17 @@ GetHistoryPointMetadata(ctx context.Context, pointIDs []uuid.UUID, includeArchiv
 | BOOL | `DB2.10.0` | 读DB2的第10字节的第0位 |
 | INT | `DB2.10` | 读DB2的第10字节开始的2字节（16位整数） |
 | REAL | `DB2.10` | 读DB2的第10字节开始的4字节（32位浮点数） |
+| REAL | `DB2.1186.0` | 兼容现场 DB 数值地址末尾 `.0` 的工程记法，实际按字节偏移 1186 连续读取 4 字节 |
+| REAL | `MD540` | M 区双字地址，按字节偏移 540 连续读写 4 字节 |
+| INT | `MW540` | M 区字地址，按字节偏移 540 连续读写 2 字节 |
 
 解析规则：
 - 地址格式：`{type_prefix}{numbers}`，其中 numbers 以 `.` 分隔
 - 对于 BOOL 类型：必须有3段（或2段，M/I/Q类型），如 `DB2.10.0` 或 `M4.0`
-- 对于 INT/REAL 类型：BOOL类型的地址去掉最后的 .bit 部分，如 `DB2.10`、`M4`
+- 对于 INT/REAL 类型：BOOL类型的地址通常去掉最后的 .bit 部分，如 `DB2.10`、`M4`
+- 为兼容现场工程记法，DB 数值地址允许末尾 `.0`，驱动解析时忽略该尾段；其他非 BOOL 地址不得包含 bit
+- M/Q 区数值地址允许 `MW`/`QW` 表示 INT，`MD`/`QD` 表示 REAL；I 区只读，写入点不得使用 I 区地址
+- S7 REAL 读取按 IEEE-754 大端解析，并统一四舍五入到小数点后最多 3 位
 
 **Modbus TCP协议地址格式**：
 
@@ -496,8 +515,12 @@ GetHistoryPointMetadata(ctx context.Context, pointIDs []uuid.UUID, includeArchiv
 
 - 默认分组名：`default`
 - 分组名支持任意字符串（建议不超过64字符）
-- 一个采集点只能属于一个分组
-- 分组的增删改通过修改采集点的 group_name 字段实现
+- 一个采集点或写入点只能属于一个分组
+- 分组名称保存在 `collection_groups` 表；采集点和写入点通过各自的 `group_name` 字段引用
+- 新建分组直接插入 `collection_groups`
+- 改名分组时，同步更新该分组下未逻辑删除的采集点和写入点
+- 删除非 `default` 分组时，先将该分组下未逻辑删除的采集点和写入点迁移到 `default`，再删除分组；不逻辑删除任何点位
+- `default` 分组不可删除
 - 查询时支持按分组名筛选
 
 #### 3.1.4 实时数据
@@ -548,8 +571,6 @@ Request body：
     "address": "DB2.10",
     "data_type": "REAL",
     "unit": "mg/L",
-    "valid_min": 0,
-    "valid_max": 20,
     "collect_interval": 1,
     "store_history": true,
     "history_interval": 1
@@ -563,12 +584,11 @@ Request body：
 - address：必填，1~256字符，根据设备协议类型校验格式
 - data_type：必填，枚举值：`BOOL`、`INT`、`REAL`
 - unit：可选，0~32字符；用于历史表格和图表展示
-- valid_min / valid_max：可选；同时提供时必须 valid_min <= valid_max，超范围值记为 bad 但保留原始值
 - collect_interval：必填，最小值1（秒）
 - store_history：可选，默认true
 - history_interval：当 store_history=true 时必填，必须为 1~1440 的整数（分钟）；store_history=false 时可省略并使用默认值 1，若提供仍须符合该范围
 - address 和 data_type 的兼容性校验：
-  - S7协议：BOOL类型必须包含bit位（如 `DB2.10.0`），INT/REAL类型不能包含bit位
+  - S7协议：BOOL类型必须包含bit位（如 `DB2.10.0`）；INT/REAL 类型通常不包含 bit，仅 DB 数值地址兼容末尾 `.0`
   - Modbus协议：00001/10001 地址只能使用BOOL类型，30001/40001 地址只能使用INT/REAL类型
 
 **PUT /api/v1/collection-points/{id}** — 修改采集点
@@ -584,17 +604,14 @@ PUT 使用完整替换语义，请求字段与新增一致，并额外要求 `en
     "address": "DB2.10",
     "data_type": "REAL",
     "unit": "mg/L",
-    "valid_min": 0,
-    "valid_max": 20,
     "collect_interval": 1,
     "store_history": true,
     "history_interval": 5
 }
 ```
 
-- `history_started_at` 非空时，修改 `device_id` 或 `data_type` 返回 HTTP 409、`code=41009`。
-- 名称、分组、地址、单位、有效范围、采集周期和历史间隔可以修改。
-- Service 在事务提交后发布配置变更事件，采集引擎停止旧任务并按新配置启动；5 秒内保证最终生效。
+- 当前实现允许修改 `device_id`、`data_type`、名称、分组、地址、单位、采集周期和历史间隔；修改后历史已有数据仍保留在原子表中，展示名称和单位以当前 PostgreSQL 元数据为准。
+- 当前采集调度器每秒重新加载活动采集点；点位新增、修改、删除和启停通常在下一个调度周期生效。
 
 **DELETE /api/v1/collection-points/{id}** — 逻辑删除
 
@@ -636,8 +653,6 @@ Response (200)：
                 "address": "DB2.10",
                 "data_type": "REAL",
                 "unit": "mg/L",
-                "valid_min": 0,
-                "valid_max": 20,
                 "collect_interval": 1,
                 "store_history": true,
                 "history_interval": 1,
@@ -668,15 +683,21 @@ Response (200)：
         "groups": [
             {
                 "name": "default",
-                "count": 10
+                "count": 10,
+                "collection_count": 10,
+                "write_count": 2
             },
             {
                 "name": "曝气池",
-                "count": 25
+                "count": 25,
+                "collection_count": 25,
+                "write_count": 4
             },
             {
                 "name": "加药间",
-                "count": 15
+                "count": 15,
+                "collection_count": 15,
+                "write_count": 6
             }
         ]
     }
@@ -688,10 +709,10 @@ Response (200)：
 CSV格式定义：
 
 ```csv
-name,group_name,device_name,address,data_type,unit,valid_min,valid_max,collect_interval,store_history,history_interval,enabled
-曝气池DO_01,曝气池,一期曝气柜PLC,DB2.10,REAL,mg/L,0,20,1,TRUE,1,TRUE
-进水pH,进水仪表,进水仪表柜PLC,DB1.0,REAL,pH,0,14,5,TRUE,5,TRUE
-风机运行状态,曝气池,一期曝气柜PLC,M4.0,BOOL,,,,1,TRUE,1,TRUE
+name,group_name,device_name,address,data_type,unit,collect_interval,store_history,history_interval,enabled
+曝气池DO_01,曝气池,一期曝气柜PLC,DB2.10,REAL,mg/L,1,TRUE,1,TRUE
+进水pH,进水仪表,进水仪表柜PLC,DB1.0,REAL,pH,5,TRUE,5,TRUE
+风机运行状态,曝气池,一期曝气柜PLC,M4.0,BOOL,,1,TRUE,1,TRUE
 ```
 
 注意：
@@ -703,7 +724,6 @@ name,group_name,device_name,address,data_type,unit,valid_min,valid_max,collect_i
 
 - 导入逻辑：以 name 为唯一标识，存在则更新，不存在则新增。
 - 先校验 `device_name`，再按对应协议校验地址和数据类型。
-- 若更新已有点位且 `history_started_at` 非空，CSV 不得改变 `device_name` 对应的设备或 `data_type`。
 - 响应沿用设备导入的 `{total,created,updated,failed,errors}` 结构。
 
 **GET /api/v1/collection-points/{id}** 返回列表项的完整对象，并包含 `history_started_at`；无实时缓存时 `latest_value=null`。
@@ -724,15 +744,12 @@ CREATE TABLE write_points (
     name                VARCHAR(128) NOT NULL,
     group_name          VARCHAR(64) NOT NULL DEFAULT 'default',
     device_id           UUID NOT NULL REFERENCES devices(id),
-    enabled             BOOLEAN NOT NULL DEFAULT TRUE,
     write_enabled       BOOLEAN NOT NULL DEFAULT FALSE,
     deleted             BOOLEAN NOT NULL DEFAULT FALSE,
 
     address             VARCHAR(256) NOT NULL,
     data_type           VARCHAR(16) NOT NULL,  -- 'BOOL', 'INT', 'REAL'
     unit                VARCHAR(32),
-    readback_tolerance  DOUBLE PRECISION NOT NULL DEFAULT 0.0001
-                        CHECK (readback_tolerance >= 0),
 
     created_at          TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
@@ -763,7 +780,7 @@ CREATE INDEX idx_write_points_group_name
 
 - 地址格式与采集点一致，但只允许可写区域：S7 的 DB/M/Q，Modbus 的 Coil/保持寄存器。
 - BOOL、INT 回读必须严格相等。
-- REAL 使用 `abs(readback-target) <= readback_tolerance`；默认容差 0.0001。
+- REAL 使用固定协议精度 `abs(readback-target) <= 0.0001`，该容差不作为写入点配置或 API 字段暴露。
 - 同一设备的采集、写入和回读通过设备连接命令队列串行执行，避免协议客户端并发冲突。
 
 ### 4.2 RESTful API
@@ -791,28 +808,25 @@ CREATE INDEX idx_write_points_group_name
     "name": "加药泵频率",
     "group_name": "加药间",
     "device_id": "uuid-of-device",
-    "enabled": true,
     "write_enabled": false,
     "address": "DB2.10",
     "data_type": "REAL",
-    "unit": "Hz",
-    "readback_tolerance": 0.01
+    "unit": "Hz"
 }
 ```
 
-- POST 中 `enabled` 可省略，默认 true；PUT 中全部字段必填。
+- POST/PUT 均只使用 `write_enabled` 作为写入权限开关，不再提供独立 `enabled` 字段。
 - 名称全局唯一；设备必须存在且未删除；地址必须可写并与数据类型兼容。
-- `readback_tolerance` 仅对 REAL 生效，范围 0~1,000,000。
-- GET 列表支持 `page`、`page_size`、`keyword`、`device_id`、`group_name`、`data_type`、`enabled`、`write_enabled`。
+- GET 列表支持 `page`、`page_size`、`keyword`、`device_id`、`group_name`、`data_type`、`write_enabled`。
 - DELETE 设置 `deleted=true` 并立即拒绝新的写入请求。
 
-成功响应中的写入点对象包含上述字段及 `id`、`device_name`、`protocol_type`、`created_at`、`updated_at`。
+成功响应中的写入点对象包含上述字段及 `id`、`device_name`、`protocol_type`、`readback_value`、`created_at`、`updated_at`；`readback_value` 来自该写入点最近一条写入日志，无记录时为 `null`。
 
 配置 CSV：
 
 ```csv
-name,group_name,device_name,address,data_type,unit,enabled,write_enabled,readback_tolerance
-加药泵频率,加药间,一期加药间PLC,DB2.10,REAL,Hz,TRUE,FALSE,0.01
+name,group_name,device_name,address,data_type,unit,write_enabled
+加药泵频率,加药间,一期加药间PLC,DB2.10,REAL,Hz,FALSE
 ```
 
 导入以 `name` 为唯一标识，存在则更新；失败结果返回行号、字段和稳定错误原因。写入点 CSV 成功时直接返回文件流，不使用 JSON envelope；失败时返回统一 JSON 错误。
@@ -836,7 +850,7 @@ name,group_name,device_name,address,data_type,unit,enabled,write_enabled,readbac
 
 执行流程：
 
-1. 校验点位、设备、`enabled` 和 `write_enabled`；
+1. 校验点位、设备和 `write_enabled`；
 2. 通过设备级连接队列写入；
 3. 回读并按数据类型验证；不一致时重试一次；
 4. 无论成功、失败或超时都写入 `write_logs`；
@@ -962,12 +976,12 @@ CREATE INDEX idx_write_logs_created_at ON write_logs(created_at DESC);
 
 ```
 1. Web 服务完成依赖初始化后启动采集引擎
-2. 从数据库加载所有 enabled=true AND deleted=false 的设备
-3. 从数据库加载所有 enabled=true AND deleted=false 的采集点，按 device_id 分组
-4. 对每个设备，尝试建立连接：
-   a. 连接成功 → 标记为"已连接"，启动该设备下所有采集点的采集任务
-   b. 连接失败 → 标记为"断开"，启动重连计时器
-5. 调度器按 collect_interval 生成点位任务并投递到有界 worker pool；同一设备的协议操作串行执行
+2. 启动固定数量 worker，并启动每秒一次的调度循环
+3. 调度循环每秒从 PostgreSQL 加载所有未删除的采集点及其设备元数据
+4. 跳过 `enabled=false` 的采集点；按每个点位的 `collect_interval` 判断是否到期
+5. 到期点位投递到有界 worker pool；队列满时记录告警并跳过该次调度
+6. worker 执行点位任务时通过连接管理器获取设备连接；连接不存在时按设备配置懒创建
+7. 同一设备连接内部串行执行协议读写
 ```
 
 ### 5.3 采集任务执行流程
@@ -977,21 +991,18 @@ CREATE INDEX idx_write_logs_created_at ON write_logs(created_at DESC);
 1. 调度器生成任务并投递到有界 worker pool；队列满时记录告警，不无限创建 goroutine。
 2. 获取该设备的独立 ProtocolConnection，并进入设备级串行命令队列。
 3. 读取和解析：
-   - 成功且值在有效范围内（或未配置范围）→ value=实际值, quality=good；
-   - 成功但超出 valid_min/valid_max → value=实际值, quality=bad, quality_reason=out_of_range；
+   - 成功 → value=实际值, quality=good；
    - 超时/断线/读取失败/解析失败 → value=null, quality=bad，并填写稳定 quality_reason。
 4. 更新内存 latest_values：{value, quality, quality_reason, ts}。
 5. store_history=true 且到达 history_interval 时写入 TDengine。
-6. 首次准备写入历史数据前设置 history_started_at；设置成功后即禁止修改 device_id/data_type。
-7. 如配置 MQTT，由独立发布队列异步发送，MQTT 失败不得阻塞采集任务。
+6. 首次准备写入历史数据前设置 history_started_at。
 ```
 
 ### 5.4 质量戳判定规则
 
 | 条件 | value | quality | quality_reason | TDengine quality |
 |---|---:|---|---|---:|
-| 读取、解析成功且在有效范围内 | 实际值 | `good` | null | 0 |
-| 读取成功但超出有效范围 | 实际值 | `bad` | `out_of_range` | 1 |
+| 读取、解析成功 | 实际值 | `good` | null | 0 |
 | 协议超时 | null | `bad` | `timeout` | 1 |
 | 设备断开 | null | `bad` | `disconnected` | 1 |
 | 读取异常 | null | `bad` | `read_error` | 1 |
@@ -1003,15 +1014,12 @@ API 始终返回字符串质量戳。`none` 只表示查询没有匹配记录；
 ### 5.5 断线重连机制
 
 ```
-1. 采集引擎检测到设备连接断开（读取失败或连接异常断开）
-2. 立即标记该设备状态为"断开"
-3. 该设备下所有采集点标记为 bad
-4. 启动重连计时器（间隔 = 设备配置的 reconnect_interval）
-5. 每次重连尝试：
-   a. 连接成功 → 标记设备为"已连接"，恢复采集
-   b. 连接失败 → 继续等待下一次重连
-6. 重连成功后，自动恢复所有采集点的正常采集
-7. 重连无次数限制，持续尝试直到成功或设备被禁用
+1. 采集任务获取连接或读取失败时，连接管理器将设备标记为 `disconnected`，并记录最近离线时间。
+2. 失败点位本次最新值写入内存缓存：`value=null, quality=bad`，`quality_reason` 按失败阶段记录。
+3. 后续点位到期时再次通过连接管理器获取连接；连接不存在或已失效时重新按设备配置建立连接。
+4. 任一采集读取成功后调用 `MarkConnected` 恢复设备状态为 `connected`，并仅在状态变化时更新最近在线时间。
+5. `reconnect_interval` 作为设备配置保留字段；当前实现没有独立重连计时器，实际重试节奏由点位采集周期和任务调度决定。
+6. 设备禁用或逻辑删除后不再执行采集任务。
 ```
 
 ### 5.6 动态配置更新
@@ -1029,7 +1037,7 @@ API 始终返回字符串质量戳。`none` 只表示查询没有匹配记录；
 | 删除采集点 | 停止该点的采集任务 |
 | 启用/禁用采集点 | 禁用则停止，启用则启动 |
 
-实现方式：Service 在配置事务提交后发布进程内变更事件，采集引擎正常情况下 1 秒内处理；同时每 5 秒按配置版本执行一次全量校对，作为丢事件后的兜底，因此对外保证 5 秒内最终生效。
+实现方式：当前实现不使用独立配置事件总线。采集调度器每秒重新读取活动采集点，因此点位配置通常在下一个调度周期生效；设备配置保存成功后立即使旧连接失效，下一次采集或写入按新配置重新建连。
 
 ### 5.7 TDengine 数据写入
 
@@ -1068,7 +1076,7 @@ USING collection_data TAGS (
 #### 5.7.3 写入策略
 
 - 首次准备历史写入前设置 `history_started_at`，然后使用 `INSERT INTO ... USING ... TAGS` 创建/写入子表
-- 批量写入：每1秒或每100条数据一批；服务关闭前尽力刷新
+- 当前实现到达 `history_interval` 后立即写入 TDengine；后续如引入批量队列，必须保证服务关闭前尽力刷新
 - `store_history=false` 时停止新增历史记录，但已存在的数据仍可在历史模块中查询
 - 写入频率由 `history_interval` 控制
 - 动态子表名只由已验证 UUID 派生并通过 `^p_[0-9a-f]{32}$` 校验；时间和值参数仍使用参数绑定
@@ -1126,7 +1134,7 @@ type DeviceRuntimeStatusProvider interface {
 ### 6.2 写入安全策略
 
 1. **write_enabled 开关**：写入点必须显式开启 write_enabled=true 才能写入，防止误操作
-2. **回读验证**：BOOL/INT 严格相等；REAL 满足 `abs(actual-target) <= readback_tolerance` 才算成功
+2. **回读验证**：BOOL/INT 严格相等；REAL 满足固定协议精度 `abs(actual-target) <= 0.0001` 才算成功
 3. **操作记录**：所有写入操作记录到 write_logs，包含日志 ID、时间、点位、目标值、回读值、结果、失败原因和原因；当前阶段不记录具体操作者
 4. **访问边界**：当前阶段未实施身份认证，写入 API 仅应部署在受信任的内部网络；接入身份认证后再补充操作者归属与权限控制
 
@@ -1229,6 +1237,7 @@ func (r *ProtocolRegistry) Get(protocolType string) (ProtocolDriverFactory, erro
 | 连接粒度 | 每设备一个连接实例 |
 | 地址解析 | 见 3.1.2 |
 | 配置 | `rack`、`slot` |
+| 运行时状态 | 已接入 `gos7`，现场已完成 DB REAL 采集、MD REAL 写入和回读验证 |
 
 #### 7.4.2 Modbus TCP
 
@@ -1239,6 +1248,7 @@ func (r *ProtocolRegistry) Get(protocolType string) (ProtocolDriverFactory, erro
 | 连接粒度 | 每设备一个连接实例 |
 | 地址解析 | 见 3.1.2 |
 | 配置 | `unit_id`、`float32_order`，其中 `float32_order ∈ {ABCD,BADC,CDAB,DCBA}` |
+| 运行时状态 | 已实现 Modbus TCP 客户端；支持线圈、离散输入、输入寄存器、保持寄存器读取，支持线圈、保持寄存器写入，并支持 `ABCD/BADC/CDAB/DCBA` REAL 字节序 |
 
 ---
 
@@ -1301,15 +1311,15 @@ func (r *ProtocolRegistry) Get(protocolType string) (ProtocolDriverFactory, erro
 | R006 | 采集周期最小1秒 | 不可低于1秒 |
 | R007 | 历史存储间隔范围 | 1~1440 分钟；当store_history=true时必填 |
 | R008 | 人工写入记录 | 服务端固定记录 source=manual、operator=null；当前阶段不支持自动写入 |
-| R009 | 写入回读验证 | BOOL/INT严格相等；REAL按readback_tolerance判断，不一致重试1次 |
+| R009 | 写入回读验证 | BOOL/INT严格相等；REAL按固定0.0001协议精度判断，不一致重试1次 |
 | R010 | 写入点地址类型限制 | 必须使用可写地址类型 |
-| R011 | 质量戳自动判定 | 失败时value=null且bad；越界时保留value并标记bad；无匹配记录为none |
-| R012 | 断线无限重连 | 持续按配置间隔重连，直到成功或设备被禁用 |
-| R013 | 配置变更动态生效 | 事务后事件正常1秒内生效，5秒全量校对保证最终一致 |
-| R014 | 历史语义不可变 | history_started_at非空后不可修改device_id或data_type |
+| R011 | 质量戳自动判定 | 失败时value=null且bad；读取成功即good；无匹配记录为none |
+| R012 | 断线恢复 | 后续采集任务按采集周期重新建连；任一读取成功后恢复在线状态 |
+| R013 | 配置变更动态生效 | 点位配置由每秒调度加载生效；设备配置保存后旧连接立即失效并在下次使用时重连 |
+| R014 | 历史启动标记 | 首次准备写入历史前设置history_started_at；当前实现不阻断后续device_id或data_type编辑 |
 | R015 | 协议连接隔离 | 注册Factory，每个设备独立Connection，同设备读写串行 |
 
 ---
 
-> 本文档版本：v1.2
-> 最后更新：2026-07-11
+> 本文档版本：v1.3
+> 最后更新：2026-07-13

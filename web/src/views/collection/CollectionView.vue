@@ -34,9 +34,9 @@ const form = reactive({
   address: "",
   data_type: "REAL",
   unit: "",
-  collect_interval: 1,
+  collect_interval: 10,
   store_history: true,
-  history_interval: 1,
+  history_interval: 10,
 });
 async function load() {
   try {
@@ -106,9 +106,9 @@ function open(p?: any) {
       address: "",
       data_type: "REAL",
       unit: "",
-      collect_interval: 1,
+      collect_interval: 10,
       store_history: true,
-      history_interval: 1,
+      history_interval: 10,
     },
   );
   if (!form.group_name && groups.value.length)
@@ -321,8 +321,7 @@ function formatTime(value?: string) {
             >地址<input
               v-model="form.address"
               class="input"
-              required
-              placeholder="DB2.1186.0" /></label
+              required /></label
           ><label class="field"
             >单位<input v-model="form.unit" class="input" maxlength="32"
           /></label>

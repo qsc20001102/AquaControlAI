@@ -17,6 +17,7 @@ let currentNames: string[] = [];
 let visibleNames: Record<string, boolean> = {};
 let lastCursorTime: number | null = null;
 let cursorFrame: number | undefined;
+let draggingCursor = false;
 const gridTop = 58;
 const gridBottom = 52;
 
@@ -46,6 +47,14 @@ function timestamp(value: any) {
 }
 function displayValue(value: any) {
   return typeof value === "number" ? Number(value.toFixed(3)) : value;
+}
+function displayDateTime(value: any) {
+  const time = timestamp(value);
+  if (!Number.isFinite(time)) return "—";
+  return new Date(time).toLocaleString("zh-CN", {
+    hour12: false,
+    timeZone: "Asia/Shanghai",
+  });
 }
 function axisLabel(value: number) {
   const date = new Date(value);
@@ -186,9 +195,15 @@ function cursorRows(target: number) {
     })
     .filter(Boolean);
 }
+function clampCursorTime(target: number) {
+  return Math.min(Math.max(target, props.startTime), props.endTime);
+}
+function midpointCursorTime() {
+  return props.startTime + (props.endTime - props.startTime) / 2;
+}
 function emitCursorAt(target: number) {
   if (!Number.isFinite(target)) return;
-  lastCursorTime = Math.min(Math.max(target, props.startTime), props.endTime);
+  lastCursorTime = clampCursorTime(target);
   scheduleVisualCursor(lastCursorTime);
   emit("cursor", cursorRows(lastCursorTime));
 }
@@ -232,7 +247,7 @@ function updateVisualCursor(target: number) {
     { lazyUpdate: true },
   );
 }
-function handleMouseMove(event: any) {
+function pointerTargetTime(event: any) {
   if (!chart) return;
   const x = event.zrX ?? event.offsetX;
   const y = event.zrY ?? event.offsetY;
@@ -242,7 +257,35 @@ function handleMouseMove(event: any) {
     y,
   ]) as number[];
   const target = timestamp(converted?.[0]);
-  if (Number.isFinite(target)) emitCursorAt(target);
+  return Number.isFinite(target) ? target : undefined;
+}
+function updateCursorFromPointer(event: any) {
+  const target = pointerTargetTime(event);
+  if (target !== undefined) emitCursorAt(target);
+}
+function isPrimaryMouseDown(event: any) {
+  const native = event.event;
+  return native?.button === undefined || native.button === 0;
+}
+function isPrimaryButtonStillPressed(event: any) {
+  const native = event.event;
+  return native?.buttons === undefined || (native.buttons & 1) === 1;
+}
+function handleMouseDown(event: any) {
+  if (!isPrimaryMouseDown(event)) return;
+  draggingCursor = true;
+  updateCursorFromPointer(event);
+}
+function handleMouseMove(event: any) {
+  if (!draggingCursor) return;
+  if (!isPrimaryButtonStillPressed(event)) {
+    draggingCursor = false;
+    return;
+  }
+  updateCursorFromPointer(event);
+}
+function stopCursorDrag() {
+  draggingCursor = false;
 }
 function handleLegendChange(event: any) {
   visibleNames = { ...(event.selected ?? {}) };
@@ -281,6 +324,7 @@ function render() {
         s.unit,
         s.point_name,
         s.point_id,
+        d.quality_reason,
       ];
       if (d.quality === "bad") {
         solid.push([
@@ -292,6 +336,7 @@ function render() {
           s.unit,
           s.point_name,
           s.point_id,
+          d.quality_reason,
         ]);
         bad.push([
           d.ts,
@@ -302,6 +347,7 @@ function render() {
           s.unit,
           s.point_name,
           s.point_id,
+          d.quality_reason,
         ]);
       } else {
         solid.push(row);
@@ -314,6 +360,7 @@ function render() {
           s.unit,
           s.point_name,
           s.point_id,
+          d.quality_reason,
         ]);
       }
     });
@@ -323,11 +370,12 @@ function render() {
         id: `${s.point_id}-good`,
         name: currentNames[i],
         type: "line",
-        showSymbol: false,
+        showSymbol: true,
+        symbolSize: 4,
         connectNulls: false,
         data: solid,
         lineStyle: { width: 1.8, color },
-        itemStyle: { color },
+        itemStyle: { color, opacity: 0.82 },
         emphasis: { focus: "series" },
       },
       {
@@ -368,27 +416,22 @@ function render() {
         itemHeight: 8,
       },
       tooltip: {
-        trigger: "axis",
+        trigger: "item",
         transitionDuration: 0.12,
-        axisPointer: {
-          type: "none",
-        },
         backgroundColor: "#07141af2",
         borderColor: "#35505a",
         textStyle: { color: "#dce9e5" },
-        formatter: (params: any) => {
-          const rows = Array.isArray(params) ? params : [params];
-          const axisValue = rows[0]?.axisValue;
-          const target =
-            lastCursorTime ?? timestamp(axisValue ?? rows[0]?.data?.[2]);
-          if (!Number.isFinite(target)) return "";
-          emitCursorAt(target);
-          return cursorRows(target)
-            .map(
-              (row: any) =>
-                `${row.pointName}<br/>${displayValue(row.value) ?? "—"} ${row.unit ?? ""} · ${row.quality}`,
-            )
-            .join("<br/>\n");
+        formatter: (param: any) => {
+          const row = param?.data ?? [];
+          if (row[1] === null || row[1] === undefined) return "";
+          const unit = row[5] ? ` ${row[5]}` : "";
+          const reason = row[8] ? `<br/>原因：${row[8]}` : "";
+          return [
+            `${row[6] ?? param.seriesName}`,
+            `时间：${displayDateTime(row[2] ?? row[0])}`,
+            `数值：${displayValue(row[3]) ?? "—"}${unit}`,
+            `质量：${row[4] ?? "none"}${reason}`,
+          ].join("<br/>");
         },
       },
       xAxis: {
@@ -424,7 +467,11 @@ function render() {
     },
     true,
   );
-  if (lastCursorTime !== null) scheduleVisualCursor(lastCursorTime);
+  const target =
+    lastCursorTime === null
+      ? midpointCursorTime()
+      : clampCursorTime(lastCursorTime);
+  emitCursorAt(target);
 }
 onMounted(() => {
   chart = echarts.init(el.value!);
@@ -433,8 +480,13 @@ onMounted(() => {
     if (chart && lastCursorTime !== null) scheduleVisualCursor(lastCursorTime);
   });
   observer.observe(el.value!);
+  chart.getZr().on("mousedown", handleMouseDown);
   chart.getZr().on("mousemove", handleMouseMove);
+  chart.getZr().on("mouseup", stopCursorDrag);
+  chart.getZr().on("globalout", stopCursorDrag);
   chart.on("legendselectchanged", handleLegendChange);
+  document.addEventListener("mouseup", stopCursorDrag);
+  window.addEventListener("blur", stopCursorDrag);
   render();
 });
 watch(
@@ -445,8 +497,13 @@ watch(
 onBeforeUnmount(() => {
   if (cursorFrame !== undefined) cancelAnimationFrame(cursorFrame);
   observer?.disconnect();
+  chart?.getZr().off("mousedown", handleMouseDown);
   chart?.getZr().off("mousemove", handleMouseMove);
+  chart?.getZr().off("mouseup", stopCursorDrag);
+  chart?.getZr().off("globalout", stopCursorDrag);
   chart?.off("legendselectchanged", handleLegendChange);
+  document.removeEventListener("mouseup", stopCursorDrag);
+  window.removeEventListener("blur", stopCursorDrag);
   chart?.dispose();
 });
 </script>

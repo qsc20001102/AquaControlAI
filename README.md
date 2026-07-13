@@ -155,6 +155,6 @@ Get-NetTCPConnection -LocalPort 8080,5173 -ErrorAction SilentlyContinue
 
 - 数据库密码不得提交到仓库。
 - PLC 人工写入必须启用 `write_enabled`，执行后回读验证并记录 `write_logs`。
-- Modbus TCP 驱动已保留协议工厂和地址校验，本阶段不进行现场测试。
+- Modbus TCP 驱动已支持运行时读写。
 
 开发过程和测试证据见 `docs/development-log.md`。

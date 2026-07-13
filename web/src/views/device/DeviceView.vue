@@ -12,7 +12,7 @@ type Device = {
   connection_status: string;
   last_online_at?: string;
   last_offline_at?: string;
-  protocol_config: Record<string, number>;
+  protocol_config: Record<string, number | string>;
 };
 const items = ref<Device[]>([]),
   loading = ref(false),
@@ -25,11 +25,24 @@ const form = reactive({
   host: "192.168.107.10",
   port: 102,
   connect_timeout: 5,
-  reconnect_interval: 10,
+  reconnect_interval: 5,
   enabled: true,
   rack: 0,
   slot: 0,
+  unit_id: 1,
+  float32_order: "CDAB",
 });
+function applyProtocolDefaults() {
+  if (form.protocol_type === "S7") {
+    form.port = 102;
+    form.rack = 0;
+    form.slot = 0;
+    return;
+  }
+  form.port = 502;
+  form.unit_id = 1;
+  form.float32_order = "CDAB";
+}
 async function load() {
   loading.value = true;
   try {
@@ -49,22 +62,26 @@ function open(d?: Device) {
   Object.assign(
     form,
     d
-      ? {
-          ...d,
-          rack: d.protocol_config.rack ?? 0,
-          slot: d.protocol_config.slot ?? 0,
-        }
-      : {
-          name: "",
-          protocol_type: "S7",
-          host: "192.168.107.10",
-          port: 102,
-          connect_timeout: 5,
-          reconnect_interval: 10,
-          enabled: true,
-          rack: 0,
-          slot: 0,
-        },
+        ? {
+            ...d,
+            rack: d.protocol_config.rack ?? 0,
+            slot: d.protocol_config.slot ?? 0,
+            unit_id: d.protocol_config.unit_id ?? 1,
+            float32_order: String(d.protocol_config.float32_order ?? "CDAB"),
+          }
+        : {
+            name: "",
+            protocol_type: "S7",
+            host: "192.168.107.10",
+            port: 102,
+            connect_timeout: 5,
+            reconnect_interval: 5,
+            enabled: true,
+            rack: 0,
+            slot: 0,
+            unit_id: 1,
+            float32_order: "CDAB",
+          },
   );
   show.value = true;
 }
@@ -74,7 +91,7 @@ async function save() {
     protocol_config:
       form.protocol_type === "S7"
         ? { rack: form.rack, slot: form.slot }
-        : { unit_id: 1, float32_order: "ABCD" },
+        : { unit_id: form.unit_id, float32_order: form.float32_order },
   };
   try {
     editing.value
@@ -212,7 +229,11 @@ function formatTime(value?: string) {
               required
               maxlength="128" /></label
           ><label class="field"
-            >协议<select v-model="form.protocol_type" class="select">
+            >协议<select
+              v-model="form.protocol_type"
+              class="select"
+              @change="applyProtocolDefaults"
+            >
               <option>S7</option>
               <option>MODBUS_TCP</option>
             </select></label
@@ -236,6 +257,23 @@ function formatTime(value?: string) {
                 v-model.number="form.slot"
                 class="input"
                 type="number" /></label></template
+          ><template v-else
+            ><label class="field"
+              >站号<input
+                v-model.number="form.unit_id"
+                class="input"
+                type="number"
+                min="1"
+                max="247"
+                required /></label
+            ><label class="field"
+              >REAL 字节序<select v-model="form.float32_order" class="select">
+                <option>ABCD</option>
+                <option>BADC</option>
+                <option>CDAB</option>
+                <option>DCBA</option>
+              </select></label
+            ></template
           ><label class="field"
             >连接超时（秒）<input
               v-model.number="form.connect_timeout"
